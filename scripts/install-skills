@@ -1,0 +1,62 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "fileutils"
+require "optparse"
+
+root = File.expand_path("..", __dir__)
+skills_root = File.join(root, "skills")
+
+options = {
+  target: File.expand_path("~/.agents/skills"),
+  mode: "symlink",
+  skills: []
+}
+
+parser = OptionParser.new do |opts|
+  opts.banner = "Usage: scripts/install-skills [options] [skill ...]"
+  opts.on("--target DIR", "Install target. Default: ~/.agents/skills") { |v| options[:target] = File.expand_path(v) }
+  opts.on("--mode MODE", "symlink or copy. Default: symlink") { |v| options[:mode] = v }
+  opts.on("-h", "--help", "Show help") do
+    puts opts
+    exit
+  end
+end
+
+parser.parse!(ARGV)
+options[:skills] = ARGV
+
+unless %w[symlink copy].include?(options[:mode])
+  warn "invalid --mode: #{options[:mode]}"
+  exit 2
+end
+
+available = Dir.children(skills_root).select { |name| File.file?(File.join(skills_root, name, "SKILL.md")) }.sort
+selected = options[:skills].empty? ? available : options[:skills]
+
+missing = selected - available
+if missing.any?
+  warn "unknown skill(s): #{missing.join(", ")}"
+  warn "available: #{available.join(", ")}"
+  exit 1
+end
+
+FileUtils.mkdir_p(options[:target])
+
+selected.each do |name|
+  source = File.join(skills_root, name)
+  target = File.join(options[:target], name)
+
+  if File.exist?(target) || File.symlink?(target)
+    warn "exists, skipping: #{target}"
+    next
+  end
+
+  if options[:mode] == "symlink"
+    FileUtils.ln_s(source, target)
+  else
+    FileUtils.cp_r(source, target)
+  end
+
+  puts "#{options[:mode]} #{name} -> #{target}"
+end

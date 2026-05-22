@@ -1,0 +1,49 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "yaml"
+
+root = File.expand_path("..", __dir__)
+skill_files = Dir.glob(File.join(root, "skills", "*", "SKILL.md")).sort
+
+if skill_files.empty?
+  warn "No skills/*/SKILL.md files found."
+  exit 1
+end
+
+errors = []
+
+skill_files.each do |path|
+  rel = path.delete_prefix("#{root}/")
+  text = File.read(path)
+  unless text.start_with?("---\n")
+    errors << "#{rel}: missing YAML frontmatter"
+    next
+  end
+
+  close = text.index("\n---", 4)
+  unless close
+    errors << "#{rel}: unterminated YAML frontmatter"
+    next
+  end
+
+  yaml_text = text[4...close]
+  begin
+    data = YAML.safe_load(yaml_text, permitted_classes: [], aliases: false) || {}
+  rescue Psych::Exception => e
+    errors << "#{rel}: invalid YAML: #{e.message}"
+    next
+  end
+
+  name = data["name"]
+  description = data["description"]
+  errors << "#{rel}: missing name" unless name.is_a?(String) && !name.strip.empty?
+  errors << "#{rel}: missing description" unless description.is_a?(String) && !description.strip.empty?
+end
+
+if errors.any?
+  warn errors.join("\n")
+  exit 1
+end
+
+puts "validated #{skill_files.length} skills"
