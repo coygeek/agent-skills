@@ -16,8 +16,10 @@ or wants a prompt for another agent.
 1. Identify the task from the user text. If the user gives only a short label,
    infer from the current repo, recent discussion, branch name, linked issue/PR,
    docs, and obvious nearby context.
-2. Do your own review first. Read enough code/docs/git/GitHub context to
-   understand the task, risks, current state, and whether it may be a bad idea.
+2. Gather enough context to write a useful handoff: repo/product identity,
+   relevant issue/PR/branch names, likely modules, constraints, and known
+   symptoms. Do not perform the receiving agent's full independent review or
+   decide the final technical direction for them.
 3. Write a standalone prompt for a fresh agent.
 4. Copy the full prompt to the clipboard.
 5. Final reply: terse confirmation with the task title. Do not paste the full
@@ -30,6 +32,8 @@ The prompt must:
 - Start a discussion, not a command-only work order.
 - Ask the receiving agent to do an extensive independent review before changing
   anything.
+- Make clear that the receiving agent owns that review; the handoff only gives
+  starting context and known constraints.
 - Ask the agent to decide whether the task is a good idea, stale, already
   solved, over-scoped, or better handled differently.
 - Assume the agent starts in the repo, a parent directory, a workspace directory,
