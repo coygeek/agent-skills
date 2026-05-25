@@ -551,6 +551,7 @@ mark { background: var(--mark); color: var(--ink); padding: 0 1px; }
   const filters = ["message", "tool_call", "tool_result", "reasoning", "memory", "system", "event"];
   const themeStorageKey = "session-viewer-theme";
   const viewModeStorageKey = "session-viewer-view-mode";
+  const maxSearchBlocks = 250;
   const defaultFilters = filters.filter((filter) => filter !== "system" && filter !== "event");
   const state = { doc: null, enabled: new Set(defaultFilters), homePath: "", query: "", showRaw: false, theme: localStorage.getItem(themeStorageKey) || "system", viewMode: localStorage.getItem(viewModeStorageKey) || "reader" };
   let searchTimer = 0;
@@ -877,7 +878,7 @@ mark { background: var(--mark); color: var(--ink); padding: 0 1px; }
   };
   const highlight = (text) => {
     const escaped = escapeHtml(shortenHomePaths(text));
-    if (!state.query) return escaped;
+    if (!state.query || state.query.length < 3) return escaped;
     const q = state.query
       .replace(/[.*+?^$()|[\\]\\\\]/g, "\\\\$&")
       .replaceAll("{", "\\\\{")
@@ -903,7 +904,7 @@ mark { background: var(--mark); color: var(--ink); padding: 0 1px; }
     html = html.replace(/(^|\\s)\\*([^*\\n]+)\\*(?=\\s|$)/gu, "$1<em>$2</em>");
     html = html.replace(/(^|\\s)_([^_\\n]+)_(?=\\s|$)/gu, "$1<em>$2</em>");
     html = html.replace(/\\u0000(\\d+)\\u0000/gu, (_, index) => placeholders[Number(index)] ?? "");
-    if (state.query) {
+    if (state.query && state.query.length >= 3) {
       const q = state.query
         .replace(/[.*+?^$()|[\\]\\\\]/g, "\\\\$&")
         .replaceAll("{", "\\\\{")
@@ -1017,6 +1018,12 @@ mark { background: var(--mark); color: var(--ink); padding: 0 1px; }
     $("subtitle").textContent = doc?.sourcePath ? shortenHomePaths(doc.sourcePath) : "Load a Codex, Claude, or OpenClaw/Pi JSONL file.";
     const visible = doc ? doc.events.filter(isVisible) : [];
     const readerItems = doc && state.viewMode === "reader" ? buildReaderItems(doc.events) : [];
+    const renderedReaderItems = state.query ? readerItems.slice(0, maxSearchBlocks) : readerItems;
+    const renderedVisible = state.query ? visible.slice(0, maxSearchBlocks) : visible;
+    const searchOverflow = state.query && (
+      (state.viewMode === "reader" && readerItems.length > renderedReaderItems.length) ||
+      (state.viewMode !== "reader" && visible.length > renderedVisible.length)
+    );
     const navItems = state.viewMode === "reader" ? readerItems.map((item) => ({
       id: item.id,
       kind: item.type === "message" ? String(item.event.role ?? "message") : "work",
@@ -1033,12 +1040,13 @@ mark { background: var(--mark); color: var(--ink); padding: 0 1px; }
     const metaEntries = Object.entries(doc?.meta ?? {}).filter(([key]) => ["id", "cwd", "timestamp", "cli_version", "model_provider"].includes(key));
     $("meta").innerHTML = doc ? metaEntries.map(([k,v]) => "<div><b>" + escapeHtml(k) + ":</b> " + escapeHtml(shortenHomePaths(v)) + "</div>").join("") : "";
     $("timeline").innerHTML = navItems.slice(0, 600).map((item) => '<button class="nav-item" data-jump="' + escapeHtml(item.id) + '"><span class="nav-kind">' + escapeHtml(item.kind) + '</span><span class="nav-title">' + escapeHtml(item.title) + '</span></button>').join("");
-    const content = state.viewMode === "reader" ? readerItems.map(renderReaderItem).join("") : visible.map((event) => renderEvent(event)).join("");
-    $("events").innerHTML = doc && content ? content : '<div class="empty"><h2>No session loaded</h2><p>Choose a JSONL file in the sidebar.</p></div>';
+    const overflow = searchOverflow ? '<div class="empty"><h2>Showing first ' + maxSearchBlocks + ' matches</h2><p>Narrow the search to render fewer results.</p></div>' : "";
+    const content = state.viewMode === "reader" ? renderedReaderItems.map(renderReaderItem).join("") : renderedVisible.map((event) => renderEvent(event)).join("");
+    $("events").innerHTML = doc && (content || overflow) ? content + overflow : '<div class="empty"><h2>No session loaded</h2><p>Choose a JSONL file in the sidebar.</p></div>';
   };
   const scheduleRender = () => {
     window.clearTimeout(searchTimer);
-    searchTimer = window.setTimeout(render, 120);
+    searchTimer = window.setTimeout(render, 80);
   };
   const loadDoc = (doc) => { indexDoc(doc); state.doc = doc; state.homePath = inferHomePath(doc); state.enabled = new Set(defaultFilters); renderFilters(); render(); };
   const renderFilters = () => {
@@ -1062,7 +1070,13 @@ mark { background: var(--mark); color: var(--ink); padding: 0 1px; }
     const button = event.target.closest("[data-jump]");
     if (button) document.getElementById(button.dataset.jump)?.scrollIntoView({ block: "start", behavior: "smooth" });
   });
-  $("search").addEventListener("input", (event) => { state.query = event.target.value.trim().toLowerCase(); scheduleRender(); });
+  $("search").addEventListener("input", (event) => {
+    const query = event.target.value.trim().toLowerCase();
+    const nextQuery = query.length >= 3 ? query : "";
+    if (nextQuery === state.query) return;
+    state.query = nextQuery;
+    scheduleRender();
+  });
   $("clear-search").addEventListener("click", () => { state.query = ""; $("search").value = ""; render(); });
   $("theme-select").addEventListener("change", (event) => {
     state.theme = event.target.value;
