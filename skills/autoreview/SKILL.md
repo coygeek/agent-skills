@@ -1,6 +1,6 @@
 ---
 name: autoreview
-description: "Auto Review closeout. Codex review is the default when no engine is set and is the recommended reviewer."
+description: "Run a structured code review (Codex default, Claude optional) as a closeout check on a local or PR branch before commit or ship."
 ---
 
 # Auto Review
