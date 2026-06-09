@@ -815,6 +815,10 @@ def extract_json_from_jsonl(text: str) -> dict[str, Any] | None:
             candidates.append(data["content"])
         if isinstance(event.get("result"), str):
             candidates.append(event["result"])
+        if isinstance(event.get("text"), str):
+            candidates.append(event["text"])
+        if isinstance(event.get("finalText"), str):
+            candidates.append(event["finalText"])
         if isinstance(event.get("structured_output"), dict):
             candidates.append(event["structured_output"])
     for candidate in reversed(candidates):
@@ -826,6 +830,31 @@ def extract_json_from_jsonl(text: str) -> dict[str, Any] | None:
         if isinstance(parsed, dict) and "findings" in parsed:
             return parsed
     return None
+
+
+def self_test_jsonl_parser() -> int:
+    report = {
+        "findings": [],
+        "overall_correctness": "patch is correct",
+        "overall_explanation": "ok",
+        "overall_confidence": 0.9,
+    }
+    payload = json.dumps(report)
+    droid_stream = "\n".join(
+        [
+            json.dumps({"type": "system", "subtype": "init", "model": "claude-opus-4-8"}),
+            json.dumps({"type": "message", "role": "assistant", "text": payload}),
+            json.dumps({"type": "completion", "finalText": payload, "numTurns": 1}),
+        ]
+    )
+    parsed = extract_json_from_jsonl(droid_stream)
+    if parsed != report:
+        raise SystemExit("droid stream-json parser self-test failed")
+    codex_style = json.dumps({"part": {"text": payload}})
+    if extract_json_from_jsonl(codex_style) != report:
+        raise SystemExit("codex-style jsonl parser self-test failed")
+    print("autoreview jsonl parser self-test: ok")
+    return 0
 
 
 def parse_json_candidate(text: str) -> Any | None:
@@ -1015,6 +1044,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--require-finding", action="append", default=[], help="Require finding text to contain this substring.")
     parser.add_argument("--expect-findings", action="store_true", help="Treat findings as success; for harness acceptance tests.")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--self-test-jsonl-parser", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.engine not in ENGINES:
         raise SystemExit(f"invalid --engine/AUTOREVIEW_ENGINE: {args.engine}")
@@ -1182,6 +1212,8 @@ def run_panel(args: argparse.Namespace, reviewers: list[argparse.Namespace], rep
 
 def main() -> int:
     args = parse_args()
+    if args.self_test_jsonl_parser:
+        return self_test_jsonl_parser()
     reviewers = reviewer_args(args)
     repo = repo_root()
     target, target_ref = choose_target(repo, args.mode, args.base)
