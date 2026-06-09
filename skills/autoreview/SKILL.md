@@ -1,6 +1,6 @@
 ---
 name: autoreview
-description: "Run a structured code review (Codex default, Claude optional) as a closeout check on a local or PR branch before commit or ship."
+description: "Run a structured code review (Codex default, optional Claude, Pi, Droid, or Copilot) as a closeout check on a local or PR branch before commit or ship."
 ---
 
 # Auto Review
@@ -11,7 +11,7 @@ Codex review is the default when no engine is set. It usually delivers the best 
 
 Use when:
 
-- user asks for Codex review / Claude review / autoreview / second-model review
+- user asks for Codex review / Claude review / Pi review / autoreview / second-model review
 - after non-trivial code edits, before final/commit/ship
 - reviewing a local branch or PR branch after fixes
 
@@ -135,7 +135,7 @@ Tradeoff: tests may force code changes that stale the review. If tests or review
 Run multiple reviewers against one frozen bundle:
 
 ```bash
-"$AUTOREVIEW" --reviewers codex,claude
+"$AUTOREVIEW" --reviewers codex,claude,pi
 ```
 
 `--panel` is shorthand for Codex plus Claude unless `--engine` changes the first reviewer:
@@ -158,7 +158,8 @@ Inline syntax is also supported:
 
 Codex maps thinking to `model_reasoning_effort` and accepts `low`, `medium`,
 `high`, or `xhigh`. Claude maps thinking to `--effort` and also accepts `max`.
-Engines without a real thinking knob reject `--thinking`.
+Pi accepts `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`. Engines
+without a real thinking knob reject `--thinking`.
 
 ## Context Efficiency
 
@@ -196,7 +197,7 @@ The helper:
 - accepts `--mode uncommitted` as an alias for `--mode local`
 - otherwise uses current PR base if `gh pr view` works
 - otherwise uses `origin/main` for non-main branches
-- supports `--engine codex`, `claude`, `droid`, and `copilot`; default is `AUTOREVIEW_ENGINE` or `codex`; Codex should remain the default when nothing is set
+- supports `--engine codex`, `claude`, `droid`, `copilot`, and `pi`; default is `AUTOREVIEW_ENGINE` or `codex`; Codex should remain the default when nothing is set
 - resolves bare `git`, `gh`, reviewer, and PowerShell shell commands from absolute `PATH` entries only, never from the reviewed checkout; explicit relative `--*-bin` paths are resolved from the reviewed repository root
 - use `--mode commit --commit <ref>` for already-committed work, especially clean `main` after landing
 - should be left in `--mode auto` or forced to `--mode branch` for PR/branch work; do not force `--mode local` after committing
@@ -205,6 +206,7 @@ The helper:
 - supports `--stream-engine-output` or `AUTOREVIEW_STREAM_ENGINE_OUTPUT=1` for live engine text while preserving structured validation; Codex and Claude hide tool/file event details, emit compact activity summaries, and report usage at turn completion
 - supports opt-in review panels with `--panel` / `--reviewers`, plus per-engine `--model` and `--thinking`
 - allows read-only tools and web search by default where the selected CLI supports them; forbids nested review in the prompt; Codex is run through `codex exec` with read-only sandbox and structured output
+- runs Pi with `--no-session`, disables Pi context/resource loading, and uses built-in read-only tools (`read,grep,find,ls`) when tools are enabled
 - prints `review still running: <engine> elapsed=<seconds>s pid=<pid>` to stderr at long-running intervals while waiting for the selected review engine, unless streamed output or compact Codex activity has been visible recently
 - prints `autoreview clean: no accepted/actionable findings reported` when the selected review command exits 0
 - exits nonzero when accepted/actionable findings are present
