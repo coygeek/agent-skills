@@ -11,7 +11,7 @@ Codex review is the default when no engine is set. It usually delivers the best 
 
 Use when:
 
-- user asks for Codex review / Claude review / Pi review / autoreview / second-model review
+- user asks for Codex review / Claude review / Pi review / Droid review / autoreview / second-model review
 - after non-trivial code edits, before final/commit/ship
 - reviewing a local branch or PR branch after fixes
 
@@ -135,7 +135,7 @@ Tradeoff: tests may force code changes that stale the review. If tests or review
 Run multiple reviewers against one frozen bundle:
 
 ```bash
-"$AUTOREVIEW" --reviewers codex,claude,pi
+"$AUTOREVIEW" --reviewers codex,claude,pi,droid
 ```
 
 `--panel` is shorthand for Codex plus Claude unless `--engine` changes the first reviewer:
@@ -150,16 +150,42 @@ Set reviewer models and thinking/effort explicitly:
 "$AUTOREVIEW" --reviewers codex,claude --model codex=gpt-5.1 --thinking codex=high --model claude=sonnet --thinking claude=max
 ```
 
-Inline syntax is also supported:
+Inline syntax is also supported for simple model IDs:
 
 ```bash
 "$AUTOREVIEW" --reviewers codex:gpt-5.1:high,claude:sonnet:max
 ```
 
-Codex maps thinking to `model_reasoning_effort` and accepts `low`, `medium`,
-`high`, or `xhigh`. Claude maps thinking to `--effort` and also accepts `max`.
-Pi accepts `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`. Engines
-without a real thinking knob reject `--thinking`.
+For models with slashes or extra colons, prefer keyed form:
+
+```bash
+"$AUTOREVIEW" --engine pi --model anthropic/claude-sonnet-4 --thinking high
+"$AUTOREVIEW" --reviewers codex,pi --model codex=gpt-5.1 --model pi=anthropic/claude-sonnet-4
+```
+
+## Models and thinking
+
+The helper accepts `--model` globally or per engine (`engine=model`) and `--thinking` globally or per engine (`engine=level`). Repeat either flag for multiple reviewers.
+
+| Engine | Model flag | Example model IDs | Thinking flag | Accepted levels |
+|--------|------------|-------------------|---------------|-----------------|
+| **codex** (default) | `codex --model X exec ...` | `gpt-5.1`, `o3` | `-c model_reasoning_effort=Y` | `low`, `medium`, `high`, `xhigh` |
+| **claude** | `claude --model X` | `sonnet`, `opus`, full Anthropic IDs | `--effort Y` | `low`, `medium`, `high`, `xhigh`, `max` |
+| **droid** | `droid exec --model X` | `claude-opus-4-8`, Factory model IDs | `-r Y` / `--reasoning-effort` | `off`, `none`, `low`, `medium`, `high` (when supported) |
+| **copilot** | `copilot --model X` | `gpt-5.2`, Copilot model aliases | not supported | — |
+| **pi** | `pi --model X` | `anthropic/claude-sonnet-4`, `openai/gpt-4o` | `--thinking Y` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
+
+Examples:
+
+```bash
+"$AUTOREVIEW" --engine codex --model gpt-5.1 --thinking high
+"$AUTOREVIEW" --engine claude --model sonnet --thinking max
+"$AUTOREVIEW" --engine droid --model claude-opus-4-8 --thinking low
+"$AUTOREVIEW" --engine copilot --model gpt-5.2
+"$AUTOREVIEW" --engine pi --model anthropic/claude-sonnet-4 --thinking high --pi-bin pi
+```
+
+Codex maps thinking to `model_reasoning_effort`. Claude maps thinking to `--effort`. Droid maps thinking to `-r, --reasoning-effort` when supported. Pi maps thinking to `--thinking`. Copilot rejects `--thinking`.
 
 ## Context Efficiency
 
@@ -206,7 +232,7 @@ The helper:
 - supports `--stream-engine-output` or `AUTOREVIEW_STREAM_ENGINE_OUTPUT=1` for live engine text while preserving structured validation; Codex and Claude hide tool/file event details, emit compact activity summaries, and report usage at turn completion
 - supports opt-in review panels with `--panel` / `--reviewers`, plus per-engine `--model` and `--thinking`
 - allows read-only tools and web search by default where the selected CLI supports them; forbids nested review in the prompt; Codex is run through `codex exec` with read-only sandbox and structured output
-- runs Pi with `--no-session`, disables Pi context/resource loading, and uses built-in read-only tools (`read,grep,find,ls`) when tools are enabled
+- runs Pi with `--no-approve`, `--no-session`, disables Pi context/resource loading, and uses built-in read-only tools (`read,grep,find,ls`) when tools are enabled
 - prints `review still running: <engine> elapsed=<seconds>s pid=<pid>` to stderr at long-running intervals while waiting for the selected review engine, unless streamed output or compact Codex activity has been visible recently
 - prints `autoreview clean: no accepted/actionable findings reported` when the selected review command exits 0
 - exits nonzero when accepted/actionable findings are present
