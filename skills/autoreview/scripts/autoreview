@@ -634,6 +634,7 @@ def run_pi(args: argparse.Namespace, repo: Path, prompt: str) -> str:
     cmd = [
         resolve_command(args.pi_bin, repo),
         "--print",
+        "--no-approve",
         "--no-session",
         "--no-context-files",
         "--no-extensions",
