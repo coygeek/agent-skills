@@ -150,15 +150,49 @@ Set reviewer models and thinking/effort explicitly:
 "$AUTOREVIEW" --reviewers codex,claude --model codex=gpt-5.1 --thinking codex=high --model claude=sonnet --thinking claude=max
 ```
 
-Inline syntax is also supported:
+Inline syntax is also supported for simple model IDs:
 
 ```bash
 "$AUTOREVIEW" --reviewers codex:gpt-5.1:high,claude:sonnet:max
 ```
 
-Codex maps thinking to `model_reasoning_effort` and accepts `none`, `minimal`,
-`low`, `medium`, `high`, or `xhigh`. Claude maps thinking to `--effort` and also accepts `max`.
-Engines without a real thinking knob reject `--thinking`.
+For models with slashes or extra colons, prefer keyed form:
+
+```bash
+"$AUTOREVIEW" --engine droid --model claude-opus-4-8
+"$AUTOREVIEW" --reviewers codex,droid --model codex=gpt-5.1 --model droid=claude-opus-4-8
+```
+
+## Models and thinking
+
+The helper accepts `--model` globally or per engine (`engine=model`) and `--thinking` globally or per engine (`engine=level`). Repeat either flag for multiple reviewers.
+
+On current `main`, Droid supports `--model` only; `--thinking` is rejected until Droid reasoning support lands.
+
+| Engine | Model flag | Example model IDs | Thinking flag | Accepted levels |
+|--------|------------|-------------------|---------------|-----------------|
+| **codex** (default) | `codex --model X exec ...` | `gpt-5.1`, `o3` | `-c model_reasoning_effort=Y` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh` |
+| **claude** | `claude --model X` | `sonnet`, `opus`, full Anthropic IDs | `--effort Y` | `low`, `medium`, `high`, `xhigh`, `max` |
+| **droid** | `droid exec --model X` | `claude-opus-4-8`, Factory model IDs | not supported on `main` | n/a |
+| **copilot** | `copilot --model X` | `gpt-5.2`, Copilot model aliases | not supported | n/a |
+
+Examples matching current `main` behavior:
+
+```bash
+# Codex with explicit model and reasoning
+"$AUTOREVIEW" --engine codex --model gpt-5.1 --thinking high
+
+# Claude Code aliases or full model names
+"$AUTOREVIEW" --engine claude --model sonnet --thinking max
+
+# Factory Droid (model only)
+"$AUTOREVIEW" --engine droid --model claude-opus-4-8
+
+# GitHub Copilot (model only; no thinking knob)
+"$AUTOREVIEW" --engine copilot --model gpt-5.2
+```
+
+Codex maps thinking to `model_reasoning_effort`. Claude maps thinking to `--effort`. Droid and Copilot reject `--thinking`.
 
 ## Review engine isolation
 
