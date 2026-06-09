@@ -1,6 +1,6 @@
 ---
 name: autoreview
-description: "Run a structured code review (Codex default, Claude optional) as a closeout check on a local or PR branch before commit or ship."
+description: "Run a structured code review (Codex default, optional Claude, Droid, or Copilot) as a closeout check on a local or PR branch before commit or ship."
 ---
 
 # Auto Review
@@ -11,7 +11,7 @@ Codex review is the default when no engine is set. It usually delivers the best 
 
 Use when:
 
-- user asks for Codex review / Claude review / autoreview / second-model review
+- user asks for Codex review / Claude review / Droid review / autoreview / second-model review
 - after non-trivial code edits, before final/commit/ship
 - reviewing a local branch or PR branch after fixes
 
@@ -135,7 +135,7 @@ Tradeoff: tests may force code changes that stale the review. If tests or review
 Run multiple reviewers against one frozen bundle:
 
 ```bash
-"$AUTOREVIEW" --reviewers codex,claude
+"$AUTOREVIEW" --reviewers codex,claude,droid
 ```
 
 `--panel` is shorthand for Codex plus Claude unless `--engine` changes the first reviewer:
@@ -158,7 +158,9 @@ Inline syntax is also supported:
 
 Codex maps thinking to `model_reasoning_effort` and accepts `low`, `medium`,
 `high`, or `xhigh`. Claude maps thinking to `--effort` and also accepts `max`.
-Engines without a real thinking knob reject `--thinking`.
+Droid maps thinking to `-r, --reasoning-effort` and accepts `off`, `none`,
+`low`, `medium`, or `high`. Engines without a real thinking knob reject
+`--thinking`.
 
 ## Context Efficiency
 
@@ -205,6 +207,7 @@ The helper:
 - supports `--stream-engine-output` or `AUTOREVIEW_STREAM_ENGINE_OUTPUT=1` for live engine text while preserving structured validation; Codex and Claude hide tool/file event details, emit compact activity summaries, and report usage at turn completion
 - supports opt-in review panels with `--panel` / `--reviewers`, plus per-engine `--model` and `--thinking`
 - allows read-only tools and web search by default where the selected CLI supports them; forbids nested review in the prompt; Codex is run through `codex exec` with read-only sandbox and structured output
+- runs Droid with `droid exec` in read-only mode, forwards `--model` and `-r, --reasoning-effort`, and switches `--output-format` to `stream-json` when streaming is enabled
 - prints `review still running: <engine> elapsed=<seconds>s pid=<pid>` to stderr at long-running intervals while waiting for the selected review engine, unless streamed output or compact Codex activity has been visible recently
 - prints `autoreview clean: no accepted/actionable findings reported` when the selected review command exits 0
 - exits nonzero when accepted/actionable findings are present

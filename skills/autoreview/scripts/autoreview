@@ -21,7 +21,7 @@ ENGINES = ("codex", "claude", "droid", "copilot")
 THINKING_LEVELS_BY_ENGINE = {
     "codex": {"low", "medium", "high", "xhigh"},
     "claude": {"low", "medium", "high", "xhigh", "max"},
-    "droid": set(),
+    "droid": {"off", "none", "low", "medium", "high"},
     "copilot": set(),
 }
 
@@ -563,8 +563,6 @@ def run_claude(args: argparse.Namespace, repo: Path, prompt: str) -> str:
 
 
 def run_droid(args: argparse.Namespace, repo: Path, prompt: str) -> str:
-    if args.thinking:
-        raise SystemExit("--thinking is not supported by the droid engine")
     prompt_path = Path(tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False).name)
     prompt_path.write_text(prompt)
     cmd = [
@@ -573,12 +571,14 @@ def run_droid(args: argparse.Namespace, repo: Path, prompt: str) -> str:
         "--cwd",
         str(repo),
         "--output-format",
-        "json",
+        "stream-json" if args.stream_engine_output else "json",
         "-f",
         str(prompt_path),
     ]
     if args.model:
         cmd.extend(["--model", args.model])
+    if args.thinking:
+        cmd.extend(["-r", args.thinking])
     if not args.tools:
         cmd.extend(["--disabled-tools", "*"])
     result = run_with_heartbeat(cmd, repo, label="droid", stream_output=args.stream_engine_output)
@@ -979,7 +979,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reviewers", help="Comma-separated review panel, e.g. codex,claude or codex:gpt-5:high.")
     parser.add_argument("--panel", action="store_true", help="Run a Codex/Claude review panel unless --engine changes the first reviewer.")
     parser.add_argument("--model", action="append", help="Model for all reviewers or engine=model. Repeatable.")
-    parser.add_argument("--thinking", action="append", help="Thinking/effort for all reviewers or engine=level. Repeatable. Codex: low, medium, high, xhigh. Claude: low, medium, high, xhigh, max.")
+    parser.add_argument("--thinking", action="append", help="Thinking/effort for all reviewers or engine=level. Repeatable. Codex: low, medium, high, xhigh. Claude: low, medium, high, xhigh, max. Droid: off, none, low, medium, high.")
     parser.add_argument("--allow-partial-panel", action="store_true", help="Continue panel output when one reviewer fails.")
     parser.add_argument("--codex-bin", default=os.environ.get("CODEX_BIN", "codex"))
     parser.add_argument("--claude-bin", default=os.environ.get("CLAUDE_BIN", "claude"))
