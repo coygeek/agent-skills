@@ -104,29 +104,34 @@ def subprocess_env(extra: dict[str, str] | None) -> dict[str, str] | None:
     return merged
 
 
-def opencode_review_config() -> dict[str, Any]:
+def opencode_review_config(web_search: bool = True) -> dict[str, Any]:
+    permission: dict[str, Any] = {
+        "*": "deny",
+        "read": {
+            "*": "allow",
+            "*.env": "ask",
+            "*.env.*": "ask",
+            "*.env.example": "allow",
+        },
+        "grep": "allow",
+        "glob": "allow",
+    }
+    if web_search:
+        permission["websearch"] = "allow"
+        permission["webfetch"] = "allow"
+    else:
+        permission["websearch"] = "deny"
+        permission["webfetch"] = "deny"
     return {
         "$schema": "https://opencode.ai/config.json",
-        "permission": {
-            "*": "deny",
-            "read": {
-                "*": "allow",
-                "*.env": "ask",
-                "*.env.*": "ask",
-                "*.env.example": "allow",
-            },
-            "grep": "allow",
-            "glob": "allow",
-            "websearch": "allow",
-            "webfetch": "allow",
-        },
+        "permission": permission,
     }
 
 
-def opencode_review_env() -> dict[str, str]:
+def opencode_review_env(web_search: bool = True) -> dict[str, str]:
     return {
         "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
-        "OPENCODE_CONFIG_CONTENT": json.dumps(opencode_review_config(), separators=(",", ":")),
+        "OPENCODE_CONFIG_CONTENT": json.dumps(opencode_review_config(web_search), separators=(",", ":")),
         "OPENCODE_DISABLE_AUTOUPDATE": "1",
         "OPENCODE_DISABLE_AUTOCOMPACT": "1",
         "OPENCODE_DISABLE_MODELS_FETCH": "1",
@@ -699,7 +704,7 @@ def run_opencode(args: argparse.Namespace, repo: Path, prompt: str) -> str:
         input_text=prompt,
         label="opencode",
         stream_output=args.stream_engine_output,
-        env=opencode_review_env(),
+        env=opencode_review_env(args.web_search),
     )
     if result.returncode != 0:
         raise SystemExit(f"opencode engine failed ({result.returncode})\n{result.stderr or result.stdout}")
@@ -929,8 +934,8 @@ def parse_json_candidate(text: str) -> Any | None:
     return parsed
 
 
-def self_test_opencode_isolation() -> None:
-    env = opencode_review_env()
+def _assert_opencode_permission(web_search: bool) -> None:
+    env = opencode_review_env(web_search)
     if env.get("OPENCODE_DISABLE_PROJECT_CONFIG") != "1":
         raise SystemExit("opencode isolation self-test failed: project config not disabled")
     config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
@@ -949,6 +954,16 @@ def self_test_opencode_isolation() -> None:
     for pattern, action in expected_read_rules.items():
         if read_permission.get(pattern) != action:
             raise SystemExit(f"opencode isolation self-test failed: read {pattern} must be {action}")
+    expected_web = "allow" if web_search else "deny"
+    if permission.get("websearch") != expected_web:
+        raise SystemExit(f"opencode isolation self-test failed: websearch must be {expected_web} when web_search={web_search}")
+    if permission.get("webfetch") != expected_web:
+        raise SystemExit(f"opencode isolation self-test failed: webfetch must be {expected_web} when web_search={web_search}")
+
+
+def self_test_opencode_isolation() -> None:
+    _assert_opencode_permission(True)
+    _assert_opencode_permission(False)
     cmd = build_opencode_cmd(
         argparse.Namespace(
             opencode_bin="opencode",

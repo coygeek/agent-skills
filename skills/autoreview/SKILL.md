@@ -172,10 +172,11 @@ OpenCode runs `opencode run --dir <repo> --pure` and passes the review prompt vi
 stdin. The helper sets `OPENCODE_DISABLE_PROJECT_CONFIG=1` and injects
 `OPENCODE_CONFIG_CONTENT` with deny-by-default permissions (`edit`/`bash` blocked
 via `"*": "deny"`; `read` preserves OpenCode's default `.env` / `.env.*` ask rules
-while allowing normal source inspection; `grep`/`glob`/`websearch`/`webfetch`
-allowed). The helper runs OpenCode in `--format json` mode and extracts final
-assistant text from emitted `type: "text"` events. Model IDs use `provider/model`
-(see `opencode models`). OpenCode rejects `--no-tools`.
+while allowing normal source inspection; `grep`/`glob` are always allowed).
+`websearch` and `webfetch` are allowed by default and explicitly denied when
+`--no-web-search` is set. The helper runs OpenCode in `--format json` mode and
+extracts final assistant text from emitted `type: "text"` events. Model IDs use
+`provider/model` (see `opencode models`). OpenCode rejects `--no-tools`.
 
 ## Context Efficiency
 
