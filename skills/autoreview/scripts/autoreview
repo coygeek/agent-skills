@@ -19,7 +19,7 @@ from typing import Any, Callable
 
 ENGINES = ("codex", "claude", "droid", "copilot")
 THINKING_LEVELS_BY_ENGINE = {
-    "codex": {"low", "medium", "high", "xhigh"},
+    "codex": {"none", "minimal", "low", "medium", "high", "xhigh"},
     "claude": {"low", "medium", "high", "xhigh", "max"},
     "droid": set(),
     "copilot": set(),
@@ -482,6 +482,14 @@ def write_json_temp(data: dict[str, Any]) -> Path:
     return Path(handle.name)
 
 
+def codex_exec_isolation_flags() -> list[str]:
+    return ["--ignore-user-config", "--ignore-rules"]
+
+
+def claude_review_isolation_flags() -> list[str]:
+    return ["--bare", "--setting-sources", "user"]
+
+
 def run_codex(args: argparse.Namespace, repo: Path, prompt: str) -> str:
     if not args.tools:
         raise SystemExit("--no-tools is not supported by the Codex engine; use --engine claude --no-tools for a no-tools run")
@@ -499,6 +507,7 @@ def run_codex(args: argparse.Namespace, repo: Path, prompt: str) -> str:
         cmd.append("--json")
     cmd.extend(
         [
+            *codex_exec_isolation_flags(),
             "--ephemeral",
             "-C",
             str(repo),
@@ -532,6 +541,7 @@ def run_codex(args: argparse.Namespace, repo: Path, prompt: str) -> str:
 def run_claude(args: argparse.Namespace, repo: Path, prompt: str) -> str:
     cmd = [
         resolve_command(args.claude_bin, repo),
+        *claude_review_isolation_flags(),
         "--print",
         "--no-session-persistence",
         "--output-format",
@@ -828,6 +838,17 @@ def extract_json_from_jsonl(text: str) -> dict[str, Any] | None:
     return None
 
 
+def self_test_engine_isolation() -> int:
+    if codex_exec_isolation_flags() != ["--ignore-user-config", "--ignore-rules"]:
+        raise SystemExit("codex isolation self-test failed")
+    if claude_review_isolation_flags() != ["--bare", "--setting-sources", "user"]:
+        raise SystemExit("claude isolation self-test failed")
+    if "none" not in THINKING_LEVELS_BY_ENGINE["codex"]:
+        raise SystemExit("codex thinking self-test failed")
+    print("autoreview engine isolation self-test: ok")
+    return 0
+
+
 def parse_json_candidate(text: str) -> Any | None:
     stripped = text.strip()
     if stripped.startswith("```"):
@@ -979,7 +1000,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reviewers", help="Comma-separated review panel, e.g. codex,claude or codex:gpt-5:high.")
     parser.add_argument("--panel", action="store_true", help="Run a Codex/Claude review panel unless --engine changes the first reviewer.")
     parser.add_argument("--model", action="append", help="Model for all reviewers or engine=model. Repeatable.")
-    parser.add_argument("--thinking", action="append", help="Thinking/effort for all reviewers or engine=level. Repeatable. Codex: low, medium, high, xhigh. Claude: low, medium, high, xhigh, max.")
+    parser.add_argument("--thinking", action="append", help="Thinking/effort for all reviewers or engine=level. Repeatable. Codex: none, minimal, low, medium, high, xhigh. Claude: low, medium, high, xhigh, max.")
     parser.add_argument("--allow-partial-panel", action="store_true", help="Continue panel output when one reviewer fails.")
     parser.add_argument("--codex-bin", default=os.environ.get("CODEX_BIN", "codex"))
     parser.add_argument("--claude-bin", default=os.environ.get("CLAUDE_BIN", "claude"))
@@ -1015,6 +1036,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--require-finding", action="append", default=[], help="Require finding text to contain this substring.")
     parser.add_argument("--expect-findings", action="store_true", help="Treat findings as success; for harness acceptance tests.")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--self-test-engine-isolation", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.engine not in ENGINES:
         raise SystemExit(f"invalid --engine/AUTOREVIEW_ENGINE: {args.engine}")
@@ -1182,6 +1204,8 @@ def run_panel(args: argparse.Namespace, reviewers: list[argparse.Namespace], rep
 
 def main() -> int:
     args = parse_args()
+    if args.self_test_engine_isolation:
+        return self_test_engine_isolation()
     reviewers = reviewer_args(args)
     repo = repo_root()
     target, target_ref = choose_target(repo, args.mode, args.base)
