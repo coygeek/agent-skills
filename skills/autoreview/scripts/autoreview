@@ -487,7 +487,7 @@ def codex_exec_isolation_flags() -> list[str]:
 
 
 def claude_review_isolation_flags() -> list[str]:
-    return ["--bare", "--setting-sources", "user"]
+    return ["--safe-mode", "--setting-sources", "user"]
 
 
 def run_codex(args: argparse.Namespace, repo: Path, prompt: str) -> str:
@@ -841,7 +841,7 @@ def extract_json_from_jsonl(text: str) -> dict[str, Any] | None:
 def self_test_engine_isolation() -> int:
     if codex_exec_isolation_flags() != ["--ignore-user-config", "--ignore-rules"]:
         raise SystemExit("codex isolation self-test failed")
-    if claude_review_isolation_flags() != ["--bare", "--setting-sources", "user"]:
+    if claude_review_isolation_flags() != ["--safe-mode", "--setting-sources", "user"]:
         raise SystemExit("claude isolation self-test failed")
     if "none" not in THINKING_LEVELS_BY_ENGINE["codex"]:
         raise SystemExit("codex thinking self-test failed")
