@@ -167,9 +167,9 @@ When autoreview runs inside the repository under review, external reviewer CLIs 
 | Engine | Isolation flags | Reference |
 |--------|-----------------|-----------|
 | **codex** | `exec --ignore-user-config --ignore-rules` plus read-only sandbox | Codex CLI `exec --help` |
-| **claude** | `--safe-mode --setting-sources user` plus explicit `--allowedTools` | Claude Code [CLI reference](https://code.claude.com/docs/en/cli-reference) |
+| **claude** | `--safe-mode --setting-sources user` plus explicit `--allowedTools` (`--safe-mode` requires Claude Code `v2.1.169+`) | Claude Code [CLI reference](https://code.claude.com/docs/en/cli-reference) |
 
-Codex `--ignore-user-config` skips `$CODEX_HOME/config.toml` for the exec run. `--ignore-rules` skips user/project execpolicy rules. Claude `--safe-mode` disables project hooks, skills, plugins, MCP servers, and CLAUDE.md while preserving normal OAuth/keychain authentication; `--setting-sources user` avoids project/local settings from the reviewed checkout.
+Codex `--ignore-user-config` skips `$CODEX_HOME/config.toml` for the exec run. `--ignore-rules` skips user/project execpolicy rules. Claude `--safe-mode` disables project hooks, skills, plugins, MCP servers, and CLAUDE.md while preserving normal authentication, model selection, built-in tools, and permissions; managed settings policy can still apply. `--setting-sources user` avoids project/local settings from the reviewed checkout, and current Claude Code docs note the project-skill blocking behavior was fixed in `v2.1.69`. `--bare` is not used here because Claude's headless docs say it skips OAuth and keychain reads.
 
 ## Context Efficiency
 
@@ -216,7 +216,7 @@ The helper:
 - supports `--stream-engine-output` or `AUTOREVIEW_STREAM_ENGINE_OUTPUT=1` for live engine text while preserving structured validation; Codex and Claude hide tool/file event details, emit compact activity summaries, and report usage at turn completion
 - supports opt-in review panels with `--panel` / `--reviewers`, plus per-engine `--model` and `--thinking`
 - allows read-only tools and web search by default where the selected CLI supports them; forbids nested review in the prompt; Codex is run through `codex exec` with read-only sandbox, config/rule isolation flags, and structured output
-- runs Claude with `--safe-mode`, `--setting-sources user`, and explicit allowed tools so reviewed-repo hooks/skills/MCP do not affect the review run while subscription/OAuth auth still works
+- runs Claude with `--safe-mode` (`v2.1.169+`), `--setting-sources user`, and explicit allowed tools so reviewed-repo hooks/skills/MCP do not affect the review run while normal auth still works; managed settings policy can still apply
 - prints `review still running: <engine> elapsed=<seconds>s pid=<pid>` to stderr at long-running intervals while waiting for the selected review engine, unless streamed output or compact Codex activity has been visible recently
 - prints `autoreview clean: no accepted/actionable findings reported` when the selected review command exits 0
 - exits nonzero when accepted/actionable findings are present
