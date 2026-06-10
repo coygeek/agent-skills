@@ -160,6 +160,7 @@ For models with slashes or extra colons, prefer keyed form:
 
 ```bash
 "$AUTOREVIEW" --engine pi --model anthropic/claude-sonnet-4 --thinking high
+"$AUTOREVIEW" --engine droid --model claude-opus-4-8
 "$AUTOREVIEW" --reviewers codex,pi --model codex=gpt-5.1 --model pi=anthropic/claude-sonnet-4
 ```
 
@@ -167,11 +168,13 @@ For models with slashes or extra colons, prefer keyed form:
 
 The helper accepts `--model` globally or per engine (`engine=model`) and `--thinking` globally or per engine (`engine=level`). Repeat either flag for multiple reviewers.
 
+On current `main`, Droid supports `--model` only; `--thinking` is rejected until [PR #16](https://github.com/openclaw/agent-skills/pull/16) lands.
+
 | Engine | Model flag | Example model IDs | Thinking flag | Accepted levels |
 |--------|------------|-------------------|---------------|-----------------|
 | **codex** (default) | `codex --model X exec ...` | `gpt-5.1`, `o3` | `-c model_reasoning_effort=Y` | `low`, `medium`, `high`, `xhigh` |
 | **claude** | `claude --model X` | `sonnet`, `opus`, full Anthropic IDs | `--effort Y` | `low`, `medium`, `high`, `xhigh`, `max` |
-| **droid** | `droid exec --model X` | `claude-opus-4-8`, Factory model IDs | `-r Y` / `--reasoning-effort` | `off`, `none`, `low`, `medium`, `high` (when supported) |
+| **droid** | `droid exec --model X` | `claude-opus-4-8`, Factory model IDs | not supported on `main` | — |
 | **copilot** | `copilot --model X` | `gpt-5.2`, Copilot model aliases | not supported | — |
 | **pi** | `pi --model X` | `anthropic/claude-sonnet-4`, `openai/gpt-4o` | `--thinking Y` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
 
@@ -180,12 +183,12 @@ Examples:
 ```bash
 "$AUTOREVIEW" --engine codex --model gpt-5.1 --thinking high
 "$AUTOREVIEW" --engine claude --model sonnet --thinking max
-"$AUTOREVIEW" --engine droid --model claude-opus-4-8 --thinking low
+"$AUTOREVIEW" --engine droid --model claude-opus-4-8
 "$AUTOREVIEW" --engine copilot --model gpt-5.2
 "$AUTOREVIEW" --engine pi --model anthropic/claude-sonnet-4 --thinking high --pi-bin pi
 ```
 
-Codex maps thinking to `model_reasoning_effort`. Claude maps thinking to `--effort`. Droid maps thinking to `-r, --reasoning-effort` when supported. Pi maps thinking to `--thinking`. Copilot rejects `--thinking`.
+Codex maps thinking to `model_reasoning_effort`. Claude maps thinking to `--effort`. Pi maps thinking to `--thinking`. Copilot rejects `--thinking`. Droid rejects `--thinking` on current `main`.
 
 ## Context Efficiency
 
