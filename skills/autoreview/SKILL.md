@@ -168,10 +168,13 @@ OpenCode example:
 "$AUTOREVIEW" --engine opencode --model github-copilot/gpt-5.4 --thinking high
 ```
 
-OpenCode runs `opencode run --dir <repo> --pure --dangerously-skip-permissions`
-with the review prompt. Use `--format json` when `--stream-engine-output` is set;
-otherwise the helper consumes the final assistant text from stdout. Model IDs use
-`provider/model` (see `opencode models`). OpenCode rejects `--no-tools`.
+OpenCode runs `opencode run --dir <repo> --pure` with the review prompt. The helper
+sets `OPENCODE_DISABLE_PROJECT_CONFIG=1` and injects `OPENCODE_CONFIG_CONTENT` with
+deny-by-default permissions (`edit`/`bash` blocked via `"*": "deny"`; `read`/`grep`/
+`glob`/`websearch`/`webfetch` allowed). Use `--format json` when
+`--stream-engine-output` is set; otherwise the helper consumes the final assistant
+text from stdout. Model IDs use `provider/model` (see `opencode models`). OpenCode
+rejects `--no-tools`.
 
 ## Context Efficiency
 

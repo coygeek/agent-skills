@@ -96,6 +96,38 @@ def run(args: list[str], cwd: Path, *, input_text: str | None = None, check: boo
     return result
 
 
+def subprocess_env(extra: dict[str, str] | None) -> dict[str, str] | None:
+    if not extra:
+        return None
+    merged = os.environ.copy()
+    merged.update(extra)
+    return merged
+
+
+def opencode_review_config() -> dict[str, Any]:
+    return {
+        "$schema": "https://opencode.ai/config.json",
+        "permission": {
+            "*": "deny",
+            "read": "allow",
+            "grep": "allow",
+            "glob": "allow",
+            "websearch": "allow",
+            "webfetch": "allow",
+        },
+    }
+
+
+def opencode_review_env() -> dict[str, str]:
+    return {
+        "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+        "OPENCODE_CONFIG_CONTENT": json.dumps(opencode_review_config(), separators=(",", ":")),
+        "OPENCODE_DISABLE_AUTOUPDATE": "1",
+        "OPENCODE_DISABLE_AUTOCOMPACT": "1",
+        "OPENCODE_DISABLE_MODELS_FETCH": "1",
+    }
+
+
 def run_with_heartbeat(
     args: list[str],
     cwd: Path,
@@ -105,6 +137,7 @@ def run_with_heartbeat(
     heartbeat_seconds: int = 60,
     stream_output: bool = False,
     stream_display: Callable[[str, str], str | None] | None = None,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if stream_output:
         return run_with_stream(
@@ -114,6 +147,7 @@ def run_with_heartbeat(
             label=label,
             heartbeat_seconds=heartbeat_seconds,
             stream_display=stream_display,
+            env=env,
         )
     started = time.monotonic()
     proc = subprocess.Popen(
@@ -123,6 +157,7 @@ def run_with_heartbeat(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=subprocess_env(env),
     )
     first_communicate = True
     while True:
@@ -146,6 +181,7 @@ def run_with_stream(
     label: str,
     heartbeat_seconds: int,
     stream_display: Callable[[str, str], str | None] | None,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     started = time.monotonic()
     proc = subprocess.Popen(
@@ -156,6 +192,7 @@ def run_with_stream(
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
+        env=subprocess_env(env),
     )
     events: queue.Queue[tuple[str, str | None]] = queue.Queue()
     stdout_parts: list[str] = []
@@ -630,16 +667,13 @@ def run_copilot(args: argparse.Namespace, repo: Path, prompt: str) -> str:
     return result.stdout
 
 
-def run_opencode(args: argparse.Namespace, repo: Path, prompt: str) -> str:
-    if not args.tools:
-        raise SystemExit("--no-tools is not supported by the opencode engine")
+def build_opencode_cmd(args: argparse.Namespace, repo: Path, prompt: str) -> list[str]:
     cmd = [
         resolve_command(args.opencode_bin, repo),
         "run",
         "--dir",
         str(repo),
         "--pure",
-        "--dangerously-skip-permissions",
     ]
     if args.stream_engine_output:
         cmd.extend(["--format", "json"])
@@ -648,7 +682,20 @@ def run_opencode(args: argparse.Namespace, repo: Path, prompt: str) -> str:
     if args.thinking:
         cmd.extend(["--variant", args.thinking])
     cmd.append(prompt)
-    result = run_with_heartbeat(cmd, repo, label="opencode", stream_output=args.stream_engine_output)
+    return cmd
+
+
+def run_opencode(args: argparse.Namespace, repo: Path, prompt: str) -> str:
+    if not args.tools:
+        raise SystemExit("--no-tools is not supported by the opencode engine")
+    cmd = build_opencode_cmd(args, repo, prompt)
+    result = run_with_heartbeat(
+        cmd,
+        repo,
+        label="opencode",
+        stream_output=args.stream_engine_output,
+        env=opencode_review_env(),
+    )
     if result.returncode != 0:
         raise SystemExit(f"opencode engine failed ({result.returncode})\n{result.stderr or result.stdout}")
     return result.stdout
@@ -873,6 +920,31 @@ def parse_json_candidate(text: str) -> Any | None:
     return parsed
 
 
+def self_test_opencode_isolation() -> None:
+    env = opencode_review_env()
+    if env.get("OPENCODE_DISABLE_PROJECT_CONFIG") != "1":
+        raise SystemExit("opencode isolation self-test failed: project config not disabled")
+    config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+    permission = config.get("permission", {})
+    if permission.get("*") != "deny":
+        raise SystemExit("opencode isolation self-test failed: default deny missing")
+    if permission.get("read") != "allow":
+        raise SystemExit("opencode isolation self-test failed: read must be allow")
+    cmd = build_opencode_cmd(
+        argparse.Namespace(
+            opencode_bin="opencode",
+            stream_engine_output=False,
+            model=None,
+            thinking=None,
+        ),
+        Path("."),
+        "prompt",
+    )
+    if "--dangerously-skip-permissions" in cmd:
+        raise SystemExit("opencode isolation self-test failed: dangerously-skip-permissions present")
+    print("self-test opencode isolation: ok")
+
+
 def self_test_opencode_jsonl_parser() -> None:
     report_json = json.dumps(
         {
@@ -1040,6 +1112,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--opencode-bin", default=os.environ.get("OPENCODE_BIN", "opencode"))
     parser.add_argument("--no-tools", dest="tools", action="store_false", default=True, help="Disable tools for engines that support it. Codex, copilot, and opencode reject no-tools review.")
     parser.add_argument("--self-test-opencode-jsonl-parser", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--self-test-opencode-isolation", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-web-search", dest="web_search", action="store_false", default=True)
     parser.add_argument(
         "--claude-allowed-tools",
@@ -1240,6 +1313,9 @@ def main() -> int:
     args = parse_args()
     if args.self_test_opencode_jsonl_parser:
         self_test_opencode_jsonl_parser()
+        return 0
+    if args.self_test_opencode_isolation:
+        self_test_opencode_isolation()
         return 0
     reviewers = reviewer_args(args)
     repo = repo_root()
