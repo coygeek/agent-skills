@@ -1022,6 +1022,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--require-finding", action="append", default=[], help="Require finding text to contain this substring.")
     parser.add_argument("--expect-findings", action="store_true", help="Treat findings as success; for harness acceptance tests.")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--self-test-fallback-scope", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.engine not in ENGINES:
         raise SystemExit(f"invalid --engine/AUTOREVIEW_ENGINE: {args.engine}")
@@ -1135,17 +1136,21 @@ def reviewer_args(args: argparse.Namespace) -> list[argparse.Namespace]:
             or env_thinking_by_engine.get(engine)
             or env_global_thinking
         )
-        fallback_model = (
-            fallback_by_engine.get(engine)
-            or global_fallback
-            or env_fallback_by_engine.get(engine)
-            or env_global_fallback
-        )
+        if engine == "claude":
+            fallback_model = (
+                fallback_by_engine.get(engine)
+                or global_fallback
+                or env_fallback_by_engine.get(engine)
+                or env_global_fallback
+            )
+        else:
+            engine_specific_fallback = fallback_by_engine.get(engine) or env_fallback_by_engine.get(engine)
+            if engine_specific_fallback:
+                raise SystemExit(f"--fallback-model is only supported for claude, not {engine}")
+            fallback_model = None
         if thinking and thinking not in THINKING_LEVELS_BY_ENGINE[engine]:
             valid = ", ".join(sorted(THINKING_LEVELS_BY_ENGINE[engine])) or "none"
             raise SystemExit(f"invalid thinking level for {engine}: {thinking} (valid: {valid})")
-        if fallback_model and engine != "claude":
-            raise SystemExit(f"--fallback-model is only supported for claude, not {engine}")
         clone = copy.copy(args)
         clone.engine = engine
         clone.model = model
@@ -1230,8 +1235,52 @@ def run_panel(args: argparse.Namespace, reviewers: list[argparse.Namespace], rep
     return report
 
 
+def self_test_fallback_scope() -> None:
+    saved = os.environ.get("AUTOREVIEW_FALLBACK_MODEL")
+    os.environ["AUTOREVIEW_FALLBACK_MODEL"] = "claude-sonnet-4-6"
+    try:
+        base = argparse.Namespace(
+            reviewers="codex,claude",
+            panel=False,
+            engine="codex",
+            model=None,
+            thinking=None,
+            fallback_model=None,
+        )
+        reviewers = reviewer_args(base)
+        codex = next(r for r in reviewers if r.engine == "codex")
+        claude = next(r for r in reviewers if r.engine == "claude")
+        if codex.fallback_model is not None:
+            raise SystemExit("self-test fallback scope failed: codex should ignore AUTOREVIEW_FALLBACK_MODEL")
+        if claude.fallback_model != "claude-sonnet-4-6":
+            raise SystemExit(f"self-test fallback scope failed: claude fallback={claude.fallback_model!r}")
+        explicit = argparse.Namespace(
+            reviewers="codex",
+            panel=False,
+            engine="codex",
+            model=None,
+            thinking=None,
+            fallback_model=["codex=foo"],
+        )
+        try:
+            reviewer_args(explicit)
+            raise SystemExit("self-test fallback scope failed: codex=fallback should be rejected")
+        except SystemExit as exc:
+            if "only supported for claude" not in str(exc):
+                raise
+    finally:
+        if saved is None:
+            os.environ.pop("AUTOREVIEW_FALLBACK_MODEL", None)
+        else:
+            os.environ["AUTOREVIEW_FALLBACK_MODEL"] = saved
+    print("self-test fallback scope: ok")
+
+
 def main() -> int:
     args = parse_args()
+    if args.self_test_fallback_scope:
+        self_test_fallback_scope()
+        return 0
     reviewers = reviewer_args(args)
     repo = repo_root()
     target, target_ref = choose_target(repo, args.mode, args.base)
