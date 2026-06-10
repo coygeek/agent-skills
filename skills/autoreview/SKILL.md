@@ -1,6 +1,6 @@
 ---
 name: autoreview
-description: "Run a structured code review (Codex default, Claude optional) as a closeout check on a local or PR branch before commit or ship."
+description: "Run a structured code review (Codex default, optional Claude, Droid, Copilot, or OpenCode) as a closeout check on a local or PR branch before commit or ship."
 ---
 
 # Auto Review
@@ -11,7 +11,7 @@ Codex review is the default when no engine is set. It usually delivers the best 
 
 Use when:
 
-- user asks for Codex review / Claude review / autoreview / second-model review
+- user asks for Codex review / Claude review / OpenCode review / autoreview / second-model review
 - after non-trivial code edits, before final/commit/ship
 - reviewing a local branch or PR branch after fixes
 
@@ -168,13 +168,14 @@ OpenCode example:
 "$AUTOREVIEW" --engine opencode --model github-copilot/gpt-5.4 --thinking high
 ```
 
-OpenCode runs `opencode run --dir <repo> --pure` with the review prompt. The helper
-sets `OPENCODE_DISABLE_PROJECT_CONFIG=1` and injects `OPENCODE_CONFIG_CONTENT` with
-deny-by-default permissions (`edit`/`bash` blocked via `"*": "deny"`; `read`/`grep`/
-`glob`/`websearch`/`webfetch` allowed). Use `--format json` when
-`--stream-engine-output` is set; otherwise the helper consumes the final assistant
-text from stdout. Model IDs use `provider/model` (see `opencode models`). OpenCode
-rejects `--no-tools`.
+OpenCode runs `opencode run --dir <repo> --pure` and passes the review prompt via
+stdin. The helper sets `OPENCODE_DISABLE_PROJECT_CONFIG=1` and injects
+`OPENCODE_CONFIG_CONTENT` with deny-by-default permissions (`edit`/`bash` blocked
+via `"*": "deny"`; `read` preserves OpenCode's default `.env` / `.env.*` ask rules
+while allowing normal source inspection; `grep`/`glob`/`websearch`/`webfetch`
+allowed). The helper runs OpenCode in `--format json` mode and extracts final
+assistant text from emitted `type: "text"` events. Model IDs use `provider/model`
+(see `opencode models`). OpenCode rejects `--no-tools`.
 
 ## Context Efficiency
 
@@ -220,7 +221,7 @@ The helper:
 - supports `--dry-run`, `--parallel-tests`, `--parallel-tests-shell`, `--prompt`, `--prompt-file`, `--dataset`, `--no-tools`, `--no-web-search`, and commit refs
 - supports `--stream-engine-output` or `AUTOREVIEW_STREAM_ENGINE_OUTPUT=1` for live engine text while preserving structured validation; Codex and Claude hide tool/file event details, emit compact activity summaries, and report usage at turn completion
 - supports opt-in review panels with `--panel` / `--reviewers`, plus per-engine `--model` and `--thinking`
-- allows read-only tools and web search by default where the selected CLI supports them; forbids nested review in the prompt; Codex is run through `codex exec` with read-only sandbox and structured output
+- allows read-only tools and web search by default where the selected CLI supports them; forbids nested review in the prompt; Codex is run through `codex exec` with read-only sandbox and structured output, and OpenCode is run through `opencode run --dir <repo> --pure` with injected deny-by-default permissions plus stdin-delivered review input
 - prints `review still running: <engine> elapsed=<seconds>s pid=<pid>` to stderr at long-running intervals while waiting for the selected review engine, unless streamed output or compact Codex activity has been visible recently
 - prints `autoreview clean: no accepted/actionable findings reported` when the selected review command exits 0
 - exits nonzero when accepted/actionable findings are present

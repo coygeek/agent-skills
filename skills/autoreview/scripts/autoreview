@@ -109,7 +109,12 @@ def opencode_review_config() -> dict[str, Any]:
         "$schema": "https://opencode.ai/config.json",
         "permission": {
             "*": "deny",
-            "read": "allow",
+            "read": {
+                "*": "allow",
+                "*.env": "ask",
+                "*.env.*": "ask",
+                "*.env.example": "allow",
+            },
             "grep": "allow",
             "glob": "allow",
             "websearch": "allow",
@@ -667,31 +672,31 @@ def run_copilot(args: argparse.Namespace, repo: Path, prompt: str) -> str:
     return result.stdout
 
 
-def build_opencode_cmd(args: argparse.Namespace, repo: Path, prompt: str) -> list[str]:
+def build_opencode_cmd(args: argparse.Namespace, repo: Path) -> list[str]:
     cmd = [
         resolve_command(args.opencode_bin, repo),
         "run",
         "--dir",
         str(repo),
         "--pure",
+        "--format",
+        "json",
     ]
-    if args.stream_engine_output:
-        cmd.extend(["--format", "json"])
     if args.model:
         cmd.extend(["-m", args.model])
     if args.thinking:
         cmd.extend(["--variant", args.thinking])
-    cmd.append(prompt)
     return cmd
 
 
 def run_opencode(args: argparse.Namespace, repo: Path, prompt: str) -> str:
     if not args.tools:
         raise SystemExit("--no-tools is not supported by the opencode engine")
-    cmd = build_opencode_cmd(args, repo, prompt)
+    cmd = build_opencode_cmd(args, repo)
     result = run_with_heartbeat(
         cmd,
         repo,
+        input_text=prompt,
         label="opencode",
         stream_output=args.stream_engine_output,
         env=opencode_review_env(),
@@ -869,6 +874,7 @@ def extract_json(text: str) -> dict[str, Any]:
 
 def extract_json_from_jsonl(text: str) -> dict[str, Any] | None:
     candidates: list[str | dict[str, Any]] = []
+    text_fragments: list[str] = []
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -882,6 +888,7 @@ def extract_json_from_jsonl(text: str) -> dict[str, Any] | None:
         part = event.get("part")
         if isinstance(part, dict) and isinstance(part.get("text"), str):
             candidates.append(part["text"])
+            text_fragments.append(part["text"])
         data = event.get("data")
         if isinstance(data, dict) and isinstance(data.get("content"), str):
             candidates.append(data["content"])
@@ -893,6 +900,8 @@ def extract_json_from_jsonl(text: str) -> dict[str, Any] | None:
             part = event.get("part")
             if isinstance(part, dict) and isinstance(part.get("text"), str):
                 candidates.append(part["text"])
+    if text_fragments:
+        candidates.append("".join(text_fragments))
     for candidate in reversed(candidates):
         if isinstance(candidate, dict):
             if "findings" in candidate:
@@ -928,8 +937,18 @@ def self_test_opencode_isolation() -> None:
     permission = config.get("permission", {})
     if permission.get("*") != "deny":
         raise SystemExit("opencode isolation self-test failed: default deny missing")
-    if permission.get("read") != "allow":
-        raise SystemExit("opencode isolation self-test failed: read must be allow")
+    read_permission = permission.get("read")
+    if not isinstance(read_permission, dict):
+        raise SystemExit("opencode isolation self-test failed: read rules missing")
+    expected_read_rules = {
+        "*": "allow",
+        "*.env": "ask",
+        "*.env.*": "ask",
+        "*.env.example": "allow",
+    }
+    for pattern, action in expected_read_rules.items():
+        if read_permission.get(pattern) != action:
+            raise SystemExit(f"opencode isolation self-test failed: read {pattern} must be {action}")
     cmd = build_opencode_cmd(
         argparse.Namespace(
             opencode_bin="opencode",
@@ -938,11 +957,14 @@ def self_test_opencode_isolation() -> None:
             thinking=None,
         ),
         Path("."),
-        "prompt",
     )
     if "--dangerously-skip-permissions" in cmd:
         raise SystemExit("opencode isolation self-test failed: dangerously-skip-permissions present")
-    print("self-test opencode isolation: ok")
+    if "--format" not in cmd or cmd[cmd.index("--format") + 1] != "json":
+        raise SystemExit("opencode isolation self-test failed: json output required")
+    if "prompt" in cmd:
+        raise SystemExit("opencode isolation self-test failed: prompt must go through stdin, not argv")
+    print("autoreview opencode isolation self-test: ok")
 
 
 def self_test_opencode_jsonl_parser() -> None:
@@ -954,13 +976,26 @@ def self_test_opencode_jsonl_parser() -> None:
             "overall_confidence": 0.9,
         }
     )
-    sample = json.dumps(
-        {
-            "type": "text",
-            "timestamp": 1,
-            "sessionID": "session-1",
-            "part": {"type": "text", "text": report_json},
-        }
+    split = max(1, len(report_json) // 2)
+    sample = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "text",
+                    "timestamp": 1,
+                    "sessionID": "session-1",
+                    "part": {"type": "text", "text": report_json[:split]},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "text",
+                    "timestamp": 2,
+                    "sessionID": "session-1",
+                    "part": {"type": "text", "text": report_json[split:]},
+                }
+            ),
+        ]
     )
     parsed = extract_json_from_jsonl(sample)
     if not parsed or parsed.get("overall_correctness") != "patch is correct":
