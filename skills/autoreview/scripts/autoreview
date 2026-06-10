@@ -17,12 +17,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-ENGINES = ("codex", "claude", "droid", "copilot")
+ENGINES = ("codex", "claude", "droid", "copilot", "opencode")
 THINKING_LEVELS_BY_ENGINE = {
     "codex": {"low", "medium", "high", "xhigh"},
     "claude": {"low", "medium", "high", "xhigh", "max"},
     "droid": set(),
     "copilot": set(),
+    "opencode": {"minimal", "low", "medium", "high", "max"},
 }
 
 
@@ -629,6 +630,30 @@ def run_copilot(args: argparse.Namespace, repo: Path, prompt: str) -> str:
     return result.stdout
 
 
+def run_opencode(args: argparse.Namespace, repo: Path, prompt: str) -> str:
+    if not args.tools:
+        raise SystemExit("--no-tools is not supported by the opencode engine")
+    cmd = [
+        resolve_command(args.opencode_bin, repo),
+        "run",
+        "--dir",
+        str(repo),
+        "--pure",
+        "--dangerously-skip-permissions",
+    ]
+    if args.stream_engine_output:
+        cmd.extend(["--format", "json"])
+    if args.model:
+        cmd.extend(["-m", args.model])
+    if args.thinking:
+        cmd.extend(["--variant", args.thinking])
+    cmd.append(prompt)
+    result = run_with_heartbeat(cmd, repo, label="opencode", stream_output=args.stream_engine_output)
+    if result.returncode != 0:
+        raise SystemExit(f"opencode engine failed ({result.returncode})\n{result.stderr or result.stdout}")
+    return result.stdout
+
+
 class CodexStreamDisplay:
     def __init__(self, *, activity_seconds: int = 20) -> None:
         self.activity_seconds = activity_seconds
@@ -817,6 +842,10 @@ def extract_json_from_jsonl(text: str) -> dict[str, Any] | None:
             candidates.append(event["result"])
         if isinstance(event.get("structured_output"), dict):
             candidates.append(event["structured_output"])
+        if event.get("type") == "text":
+            part = event.get("part")
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                candidates.append(part["text"])
     for candidate in reversed(candidates):
         if isinstance(candidate, dict):
             if "findings" in candidate:
@@ -842,6 +871,29 @@ def parse_json_candidate(text: str) -> Any | None:
         nested = parse_json_candidate(parsed)
         return nested if nested is not None else parsed
     return parsed
+
+
+def self_test_opencode_jsonl_parser() -> None:
+    report_json = json.dumps(
+        {
+            "findings": [],
+            "overall_correctness": "patch is correct",
+            "overall_explanation": "ok",
+            "overall_confidence": 0.9,
+        }
+    )
+    sample = json.dumps(
+        {
+            "type": "text",
+            "timestamp": 1,
+            "sessionID": "session-1",
+            "part": {"type": "text", "text": report_json},
+        }
+    )
+    parsed = extract_json_from_jsonl(sample)
+    if not parsed or parsed.get("overall_correctness") != "patch is correct":
+        raise SystemExit("opencode jsonl parser self-test failed")
+    print("autoreview opencode jsonl parser self-test: ok")
 
 
 def validate_report(report: dict[str, Any], repo: Path, changed_paths: set[str], required: list[str]) -> None:
@@ -985,7 +1037,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--claude-bin", default=os.environ.get("CLAUDE_BIN", "claude"))
     parser.add_argument("--droid-bin", default=os.environ.get("DROID_BIN", "droid"))
     parser.add_argument("--copilot-bin", default=os.environ.get("COPILOT_BIN", "copilot"))
-    parser.add_argument("--no-tools", dest="tools", action="store_false", default=True, help="Disable tools for engines that support it. Codex and copilot reject no-tools review.")
+    parser.add_argument("--opencode-bin", default=os.environ.get("OPENCODE_BIN", "opencode"))
+    parser.add_argument("--no-tools", dest="tools", action="store_false", default=True, help="Disable tools for engines that support it. Codex, copilot, and opencode reject no-tools review.")
+    parser.add_argument("--self-test-opencode-jsonl-parser", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-web-search", dest="web_search", action="store_false", default=True)
     parser.add_argument(
         "--claude-allowed-tools",
@@ -1030,6 +1084,8 @@ def run_engine(args: argparse.Namespace, repo: Path, prompt: str) -> str:
         return run_droid(args, repo, prompt)
     if args.engine == "copilot":
         return run_copilot(args, repo, prompt)
+    if args.engine == "opencode":
+        return run_opencode(args, repo, prompt)
     raise SystemExit(f"unsupported engine: {args.engine}")
 
 
@@ -1182,6 +1238,9 @@ def run_panel(args: argparse.Namespace, reviewers: list[argparse.Namespace], rep
 
 def main() -> int:
     args = parse_args()
+    if args.self_test_opencode_jsonl_parser:
+        self_test_opencode_jsonl_parser()
+        return 0
     reviewers = reviewer_args(args)
     repo = repo_root()
     target, target_ref = choose_target(repo, args.mode, args.base)

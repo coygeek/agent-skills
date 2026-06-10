@@ -158,7 +158,20 @@ Inline syntax is also supported:
 
 Codex maps thinking to `model_reasoning_effort` and accepts `low`, `medium`,
 `high`, or `xhigh`. Claude maps thinking to `--effort` and also accepts `max`.
-Engines without a real thinking knob reject `--thinking`.
+OpenCode maps thinking to `--variant` and accepts provider-specific values such as
+`minimal`, `low`, `medium`, `high`, or `max`. Engines without a real thinking
+knob reject `--thinking`.
+
+OpenCode example:
+
+```bash
+"$AUTOREVIEW" --engine opencode --model github-copilot/gpt-5.4 --thinking high
+```
+
+OpenCode runs `opencode run --dir <repo> --pure --dangerously-skip-permissions`
+with the review prompt. Use `--format json` when `--stream-engine-output` is set;
+otherwise the helper consumes the final assistant text from stdout. Model IDs use
+`provider/model` (see `opencode models`). OpenCode rejects `--no-tools`.
 
 ## Context Efficiency
 
@@ -196,7 +209,7 @@ The helper:
 - accepts `--mode uncommitted` as an alias for `--mode local`
 - otherwise uses current PR base if `gh pr view` works
 - otherwise uses `origin/main` for non-main branches
-- supports `--engine codex`, `claude`, `droid`, and `copilot`; default is `AUTOREVIEW_ENGINE` or `codex`; Codex should remain the default when nothing is set
+- supports `--engine codex`, `claude`, `droid`, `copilot`, and `opencode`; default is `AUTOREVIEW_ENGINE` or `codex`; Codex should remain the default when nothing is set
 - resolves bare `git`, `gh`, reviewer, and PowerShell shell commands from absolute `PATH` entries only, never from the reviewed checkout; explicit relative `--*-bin` paths are resolved from the reviewed repository root
 - use `--mode commit --commit <ref>` for already-committed work, especially clean `main` after landing
 - should be left in `--mode auto` or forced to `--mode branch` for PR/branch work; do not force `--mode local` after committing
