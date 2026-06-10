@@ -176,7 +176,7 @@ On current `main`, Droid supports `--model` only; `--thinking` is rejected until
 | **droid** | `droid exec --model X` | `claude-opus-4-8`, Factory model IDs | not supported on `main` | — |
 | **copilot** | `copilot --model X` | `gpt-5.2`, Copilot aliases | not supported | — |
 
-Claude also supports `--fallback-model a,b` for overload/retired-model fallback chains ([model-config](https://code.claude.com/docs/en/model-config)).
+Claude also supports `--fallback-model a,b` for availability-based fallback chains ([model-config](https://code.claude.com/docs/en/model-config)). Current Claude docs note that auth, billing, rate-limit, request-size, and transport errors do not trigger fallback, and the changelog documents interactive-session support in `v2.1.166`.
 
 Examples:
 
