@@ -547,6 +547,8 @@ def run_claude(args: argparse.Namespace, repo: Path, prompt: str) -> str:
         cmd.append("--verbose")
     if args.model:
         cmd.extend(["--model", args.model])
+    if getattr(args, "fallback_model", None):
+        cmd.extend(["--fallback-model", args.fallback_model])
     if args.thinking:
         cmd.extend(["--effort", args.thinking])
     result = run_with_heartbeat(
@@ -980,6 +982,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--panel", action="store_true", help="Run a Codex/Claude review panel unless --engine changes the first reviewer.")
     parser.add_argument("--model", action="append", help="Model for all reviewers or engine=model. Repeatable.")
     parser.add_argument("--thinking", action="append", help="Thinking/effort for all reviewers or engine=level. Repeatable. Codex: low, medium, high, xhigh. Claude: low, medium, high, xhigh, max.")
+    parser.add_argument(
+        "--fallback-model",
+        action="append",
+        help="Claude fallback model chain for all reviewers or claude=a,b. Repeatable.",
+    )
     parser.add_argument("--allow-partial-panel", action="store_true", help="Continue panel output when one reviewer fails.")
     parser.add_argument("--codex-bin", default=os.environ.get("CODEX_BIN", "codex"))
     parser.add_argument("--claude-bin", default=os.environ.get("CLAUDE_BIN", "claude"))
@@ -1033,6 +1040,22 @@ def run_engine(args: argparse.Namespace, repo: Path, prompt: str) -> str:
     raise SystemExit(f"unsupported engine: {args.engine}")
 
 
+def env_defaults_for(option: str) -> tuple[str | None, dict[str, str]]:
+    env_key = option.upper()
+    global_value = os.environ.get(f"AUTOREVIEW_{env_key}")
+    if global_value is not None:
+        global_value = global_value.strip() or None
+    per_engine: dict[str, str] = {}
+    for engine in ENGINES:
+        value = os.environ.get(f"AUTOREVIEW_{engine.upper()}_{env_key}")
+        if value is None:
+            continue
+        value = value.strip()
+        if value:
+            per_engine[engine] = value
+    return global_value, per_engine
+
+
 def parse_keyed_options(values: list[str] | None, option: str) -> tuple[str | None, dict[str, str]]:
     global_value: str | None = None
     per_engine: dict[str, str] = {}
@@ -1073,6 +1096,10 @@ def parse_reviewer_token(token: str) -> tuple[str, str | None, str | None]:
 def reviewer_args(args: argparse.Namespace) -> list[argparse.Namespace]:
     global_model, model_by_engine = parse_keyed_options(args.model, "model")
     global_thinking, thinking_by_engine = parse_keyed_options(args.thinking, "thinking")
+    global_fallback, fallback_by_engine = parse_keyed_options(args.fallback_model, "fallback-model")
+    env_global_model, env_model_by_engine = env_defaults_for("model")
+    env_global_thinking, env_thinking_by_engine = env_defaults_for("thinking")
+    env_global_fallback, env_fallback_by_engine = env_defaults_for("fallback_model")
     reviewers: list[tuple[str, str | None, str | None]] = []
     if args.reviewers:
         tokens = [token.strip() for token in args.reviewers.split(",") if token.strip()]
@@ -1094,15 +1121,36 @@ def reviewer_args(args: argparse.Namespace) -> list[argparse.Namespace]:
         if engine in seen:
             raise SystemExit(f"reviewer specified more than once: {engine}")
         seen.add(engine)
-        model = inline_model or model_by_engine.get(engine) or global_model
-        thinking = inline_thinking or thinking_by_engine.get(engine) or global_thinking
+        model = (
+            inline_model
+            or model_by_engine.get(engine)
+            or global_model
+            or env_model_by_engine.get(engine)
+            or env_global_model
+        )
+        thinking = (
+            inline_thinking
+            or thinking_by_engine.get(engine)
+            or global_thinking
+            or env_thinking_by_engine.get(engine)
+            or env_global_thinking
+        )
+        fallback_model = (
+            fallback_by_engine.get(engine)
+            or global_fallback
+            or env_fallback_by_engine.get(engine)
+            or env_global_fallback
+        )
         if thinking and thinking not in THINKING_LEVELS_BY_ENGINE[engine]:
             valid = ", ".join(sorted(THINKING_LEVELS_BY_ENGINE[engine])) or "none"
             raise SystemExit(f"invalid thinking level for {engine}: {thinking} (valid: {valid})")
+        if fallback_model and engine != "claude":
+            raise SystemExit(f"--fallback-model is only supported for claude, not {engine}")
         clone = copy.copy(args)
         clone.engine = engine
         clone.model = model
         clone.thinking = thinking
+        clone.fallback_model = fallback_model
         result.append(clone)
     return result
 
@@ -1111,6 +1159,8 @@ def reviewer_label(args: argparse.Namespace) -> str:
     parts = [args.engine]
     if args.model:
         parts.append(f"model={args.model}")
+    if getattr(args, "fallback_model", None):
+        parts.append(f"fallback={args.fallback_model}")
     if args.thinking:
         parts.append(f"thinking={args.thinking}")
     return " ".join(parts)
@@ -1191,6 +1241,8 @@ def main() -> int:
         print(f"engine: {reviewers[0].engine}")
         if reviewers[0].model:
             print(f"model: {reviewers[0].model}")
+        if getattr(reviewers[0], "fallback_model", None):
+            print(f"fallback_model: {reviewers[0].fallback_model}")
         if reviewers[0].thinking:
             print(f"thinking: {reviewers[0].thinking}")
     else:

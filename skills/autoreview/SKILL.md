@@ -150,15 +150,59 @@ Set reviewer models and thinking/effort explicitly:
 "$AUTOREVIEW" --reviewers codex,claude --model codex=gpt-5.1 --thinking codex=high --model claude=sonnet --thinking claude=max
 ```
 
-Inline syntax is also supported:
+Inline syntax is also supported for simple model IDs:
 
 ```bash
 "$AUTOREVIEW" --reviewers codex:gpt-5.1:high,claude:sonnet:max
 ```
 
-Codex maps thinking to `model_reasoning_effort` and accepts `low`, `medium`,
-`high`, or `xhigh`. Claude maps thinking to `--effort` and also accepts `max`.
-Engines without a real thinking knob reject `--thinking`.
+For models with slashes or extra colons, prefer keyed form:
+
+```bash
+"$AUTOREVIEW" --engine droid --model claude-opus-4-8
+"$AUTOREVIEW" --reviewers codex,droid --model codex=gpt-5.4 --model droid=claude-opus-4-8
+```
+
+## Models and thinking
+
+The helper accepts `--model` globally or per engine (`engine=model`) and `--thinking` globally or per engine (`engine=level`). Repeat either flag for multiple reviewers.
+
+On current `main`, Droid supports `--model` only; `--thinking` is rejected until [PR #16](https://github.com/openclaw/agent-skills/pull/16) lands.
+
+| Engine | Model flag | Example model IDs | Thinking flag | Accepted levels |
+|--------|------------|-------------------|---------------|-----------------|
+| **codex** (default) | `codex --model X exec ...` | `gpt-5.4`, `o3` | `-c model_reasoning_effort=Y` | `low`, `medium`, `high`, `xhigh` |
+| **claude** | `claude --model X` | `sonnet`, `opus`, `fable`, `haiku`, full IDs | `--effort Y` | `low`, `medium`, `high`, `xhigh`, `max` |
+| **droid** | `droid exec --model X` | `claude-opus-4-8`, Factory model IDs | not supported on `main` | — |
+| **copilot** | `copilot --model X` | `gpt-5.2`, Copilot aliases | not supported | — |
+
+Claude also supports `--fallback-model a,b` for overload/retired-model fallback chains ([model-config](https://code.claude.com/docs/en/model-config)).
+
+Examples:
+
+```bash
+"$AUTOREVIEW" --engine codex --model gpt-5.4 --thinking high
+"$AUTOREVIEW" --engine claude --model sonnet --thinking max
+"$AUTOREVIEW" --engine claude --model opus --fallback-model sonnet,haiku
+"$AUTOREVIEW" --engine droid --model claude-opus-4-8
+"$AUTOREVIEW" --engine copilot --model gpt-5.2
+```
+
+### Environment defaults
+
+CLI flags take precedence over environment variables.
+
+| Variable | Purpose |
+|----------|---------|
+| `AUTOREVIEW_MODEL` | Default `--model` for all engines |
+| `AUTOREVIEW_THINKING` | Default `--thinking` for all engines |
+| `AUTOREVIEW_FALLBACK_MODEL` | Default Claude `--fallback-model` chain |
+| `AUTOREVIEW_CODEX_MODEL` | Default Codex model |
+| `AUTOREVIEW_CLAUDE_MODEL` | Default Claude model |
+| `AUTOREVIEW_<ENGINE>_THINKING` | Per-engine thinking override |
+| `AUTOREVIEW_CLAUDE_FALLBACK_MODEL` | Claude-only fallback chain |
+
+Codex maps thinking to `model_reasoning_effort`. Claude maps thinking to `--effort`. Copilot rejects `--thinking`. Droid rejects `--thinking` on current `main`.
 
 ## Context Efficiency
 
@@ -203,7 +247,8 @@ The helper:
 - writes only to stdout unless `--output`, `--json-output`, or live streamed engine stderr is set
 - supports `--dry-run`, `--parallel-tests`, `--parallel-tests-shell`, `--prompt`, `--prompt-file`, `--dataset`, `--no-tools`, `--no-web-search`, and commit refs
 - supports `--stream-engine-output` or `AUTOREVIEW_STREAM_ENGINE_OUTPUT=1` for live engine text while preserving structured validation; Codex and Claude hide tool/file event details, emit compact activity summaries, and report usage at turn completion
-- supports opt-in review panels with `--panel` / `--reviewers`, plus per-engine `--model` and `--thinking`
+- supports opt-in review panels with `--panel` / `--reviewers`, plus per-engine `--model`, `--thinking`, and Claude `--fallback-model`
+- honors `AUTOREVIEW_MODEL`, `AUTOREVIEW_THINKING`, `AUTOREVIEW_FALLBACK_MODEL`, and per-engine `AUTOREVIEW_<ENGINE>_MODEL` / `AUTOREVIEW_<ENGINE>_THINKING` environment defaults when CLI flags are omitted
 - allows read-only tools and web search by default where the selected CLI supports them; forbids nested review in the prompt; Codex is run through `codex exec` with read-only sandbox and structured output
 - prints `review still running: <engine> elapsed=<seconds>s pid=<pid>` to stderr at long-running intervals while waiting for the selected review engine, unless streamed output or compact Codex activity has been visible recently
 - prints `autoreview clean: no accepted/actionable findings reported` when the selected review command exits 0
