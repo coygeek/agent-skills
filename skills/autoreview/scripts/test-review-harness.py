@@ -195,7 +195,8 @@ def load_autoreview_module(script_dir: Path) -> ModuleType:
 
 
 def write_executable(path: Path, text: str) -> None:
-    path.write_text(text, encoding="utf-8", newline="\n")
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
     path.chmod(0o755)
 
 
