@@ -27,6 +27,9 @@ THINKING_LEVELS_BY_ENGINE = {
     "pi": {"off", "minimal", "low", "medium", "high", "xhigh"},
 }
 CLAUDE_SAFE_MODE_MIN_VERSION = (2, 1, 169)
+# Pi's reviewed-repo trust override first appears in the current
+# @earendil-works/pi-coding-agent 0.79.0 CLI line. Older legacy binaries can
+# ignore unknown flags, so the Pi engine must fail closed below this floor.
 PI_TRUST_ISOLATION_MIN_VERSION = (0, 79, 0)
 
 
