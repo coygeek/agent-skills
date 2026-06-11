@@ -1336,6 +1336,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--require-finding", action="append", default=[], help="Require finding text to contain this substring.")
     parser.add_argument("--expect-findings", action="store_true", help="Treat findings as success; for harness acceptance tests.")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--self-test-config-defaults", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--self-test-fallback-scope", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--self-test-engine-isolation", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--self-test-json-array-parser", action="store_true", help=argparse.SUPPRESS)
@@ -1551,49 +1552,116 @@ def run_panel(args: argparse.Namespace, reviewers: list[argparse.Namespace], rep
     return report
 
 
+def reviewer_test_args(**overrides: Any) -> argparse.Namespace:
+    defaults = {
+        "reviewers": None,
+        "panel": False,
+        "engine": "codex",
+        "model": None,
+        "thinking": None,
+        "fallback_model": None,
+    }
+    defaults.update(overrides)
+    return argparse.Namespace(**defaults)
+
+
+def preserve_env(keys: list[str]):
+    saved = {key: os.environ.get(key) for key in keys}
+
+    class EnvGuard:
+        def __enter__(self) -> None:
+            for key in keys:
+                os.environ.pop(key, None)
+
+        def __exit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> None:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    return EnvGuard()
+
+
+def self_test_config_defaults() -> None:
+    keys = [
+        "AUTOREVIEW_MODEL",
+        "AUTOREVIEW_CODEX_MODEL",
+        "AUTOREVIEW_THINKING",
+        "AUTOREVIEW_CODEX_THINKING",
+    ]
+    with preserve_env(keys):
+        os.environ["AUTOREVIEW_MODEL"] = "env-global-model"
+        os.environ["AUTOREVIEW_CODEX_MODEL"] = "env-codex-model"
+        os.environ["AUTOREVIEW_THINKING"] = "low"
+        os.environ["AUTOREVIEW_CODEX_THINKING"] = "high"
+        codex = reviewer_args(reviewer_test_args(engine="codex"))[0]
+        if codex.model != "env-codex-model":
+            raise SystemExit(f"self-test config defaults failed: model={codex.model!r}")
+        if codex.thinking != "high":
+            raise SystemExit(f"self-test config defaults failed: thinking={codex.thinking!r}")
+        cli = reviewer_args(reviewer_test_args(engine="codex", model=["cli-model"], thinking=["medium"]))[0]
+        if cli.model != "cli-model" or cli.thinking != "medium":
+            raise SystemExit("self-test config defaults failed: CLI values should override env")
+        inline = reviewer_args(
+            reviewer_test_args(
+                reviewers="codex:inline-model:minimal",
+                model=["cli-model"],
+                thinking=["medium"],
+            )
+        )[0]
+        if inline.model != "inline-model" or inline.thinking != "minimal":
+            raise SystemExit("self-test config defaults failed: inline reviewer values should override CLI/env")
+    print("self-test config defaults: ok")
+
+
 def self_test_fallback_scope() -> None:
-    saved = os.environ.get("AUTOREVIEW_FALLBACK_MODEL")
-    os.environ["AUTOREVIEW_FALLBACK_MODEL"] = "claude-sonnet-4-6"
-    try:
-        base = argparse.Namespace(
-            reviewers="codex,claude",
-            panel=False,
-            engine="codex",
-            model=None,
-            thinking=None,
-            fallback_model=None,
-        )
+    keys = [
+        "AUTOREVIEW_FALLBACK_MODEL",
+        "AUTOREVIEW_CLAUDE_FALLBACK_MODEL",
+        "AUTOREVIEW_CODEX_FALLBACK_MODEL",
+    ]
+    with preserve_env(keys):
+        os.environ["AUTOREVIEW_FALLBACK_MODEL"] = "env-global-fallback"
+        os.environ["AUTOREVIEW_CLAUDE_FALLBACK_MODEL"] = "env-claude-fallback"
+        base = reviewer_test_args(reviewers="codex,claude")
         reviewers = reviewer_args(base)
         codex = next(r for r in reviewers if r.engine == "codex")
         claude = next(r for r in reviewers if r.engine == "claude")
         if codex.fallback_model is not None:
             raise SystemExit("self-test fallback scope failed: codex should ignore AUTOREVIEW_FALLBACK_MODEL")
-        if claude.fallback_model != "claude-sonnet-4-6":
+        if claude.fallback_model != "env-claude-fallback":
             raise SystemExit(f"self-test fallback scope failed: claude fallback={claude.fallback_model!r}")
-        explicit = argparse.Namespace(
-            reviewers="codex",
-            panel=False,
-            engine="codex",
-            model=None,
-            thinking=None,
-            fallback_model=["codex=foo"],
-        )
+        cli_global = reviewer_args(reviewer_test_args(engine="claude", fallback_model=["cli-global"]))[0]
+        if cli_global.fallback_model != "cli-global":
+            raise SystemExit("self-test fallback scope failed: CLI global fallback should override env")
+        cli_engine = reviewer_args(
+            reviewer_test_args(engine="claude", fallback_model=["cli-global", "claude=cli-claude"])
+        )[0]
+        if cli_engine.fallback_model != "cli-claude":
+            raise SystemExit("self-test fallback scope failed: CLI engine fallback should override CLI global")
+        explicit = reviewer_test_args(reviewers="codex", fallback_model=["codex=foo"])
         try:
             reviewer_args(explicit)
             raise SystemExit("self-test fallback scope failed: codex=fallback should be rejected")
         except SystemExit as exc:
             if "only supported for claude" not in str(exc):
                 raise
-    finally:
-        if saved is None:
-            os.environ.pop("AUTOREVIEW_FALLBACK_MODEL", None)
-        else:
-            os.environ["AUTOREVIEW_FALLBACK_MODEL"] = saved
+        os.environ["AUTOREVIEW_CODEX_FALLBACK_MODEL"] = "env-codex-fallback"
+        try:
+            reviewer_args(reviewer_test_args(engine="codex"))
+            raise SystemExit("self-test fallback scope failed: AUTOREVIEW_CODEX_FALLBACK_MODEL should be rejected")
+        except SystemExit as exc:
+            if "only supported for claude" not in str(exc):
+                raise
     print("self-test fallback scope: ok")
 
 
 def main() -> int:
     args = parse_args()
+    if args.self_test_config_defaults:
+        self_test_config_defaults()
+        return 0
     if args.self_test_fallback_scope:
         self_test_fallback_scope()
         return 0

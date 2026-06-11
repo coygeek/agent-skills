@@ -27,6 +27,10 @@ jobs:
         run: bash -n skills/autoreview/scripts/test-review-harness
       - name: Check Python scripts
         run: python3 -m py_compile skills/autoreview/scripts/autoreview skills/autoreview/scripts/test-review-harness.py
+      - name: Run autoreview self-tests
+        run: |
+          python3 skills/autoreview/scripts/autoreview --self-test-config-defaults
+          python3 skills/autoreview/scripts/autoreview --self-test-fallback-scope
       - name: Check Node scripts
         run: node --check skills/agent-transcript/scripts/agent-transcript
       - name: Run Node tests
