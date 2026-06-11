@@ -919,6 +919,8 @@ def build_references(args: argparse.Namespace, repo: Path) -> tuple[list[ReviewR
         if match is None:
             raise SystemExit(f"--reference-description specified unknown alias: {alias}")
         apply_reference_description(match, raw)
+    if getattr(args, "dry_run", False):
+        return references, strict, None
     workspace = materialize_git_references(references, repo, strict)
     return references, strict, workspace
 
@@ -2363,6 +2365,14 @@ def self_test_references() -> None:
         finally:
             if relative_workspace:
                 shutil.rmtree(relative_workspace, ignore_errors=True)
+        dry_refs, _dry_strict, dry_workspace = build_references(
+            reference_test_args(reference_repo=[f"drygit={git_ref}"], dry_run=True),
+            repo,
+        )
+        if dry_workspace is not None:
+            raise SystemExit("reference self-test failed: dry-run materialized git workspace")
+        if len(dry_refs) != 1 or dry_refs[0].kind != "git" or dry_refs[0].runtime_path is not None:
+            raise SystemExit("reference self-test failed: dry-run git reference should remain unmaterialized")
 
         cli_args = reference_test_args(
             reference=[f"clidocs={local_ref}"],
