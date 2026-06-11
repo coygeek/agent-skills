@@ -648,10 +648,10 @@ def validate_reference_alias(alias: str) -> str:
     alias = alias.strip()
     if not alias:
         raise SystemExit("reference alias cannot be empty")
-    if not REFERENCE_ALIAS_RE.match(alias):
+    if alias in {".", ".."} or not re.search(r"[A-Za-z0-9]", alias) or not REFERENCE_ALIAS_RE.match(alias):
         raise SystemExit(
             f"invalid reference alias: {alias!r}. Use letters, numbers, '.', '_', or '-' only; "
-            "slashes, whitespace, commas, and backticks are not allowed."
+            "include at least one letter or number; slashes, whitespace, commas, and backticks are not allowed."
         )
     return alias
 
@@ -2675,6 +2675,12 @@ def self_test_references() -> None:
         try:
             build_references(reference_test_args(reference=[f"bad/alias={local_ref}"]), repo)
             raise SystemExit("reference self-test failed: invalid alias accepted")
+        except SystemExit as exc:
+            if "invalid reference alias" not in str(exc):
+                raise
+        try:
+            build_references(reference_test_args(reference=[f"..={local_ref}"]), repo)
+            raise SystemExit("reference self-test failed: dot-segment alias accepted")
         except SystemExit as exc:
             if "invalid reference alias" not in str(exc):
                 raise
