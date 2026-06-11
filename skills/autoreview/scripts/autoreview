@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-ENGINES = ("codex", "claude", "droid", "copilot", "pi")
+ENGINES = ("codex", "claude", "droid", "copilot", "pi", "opencode")
 DEFAULT_MODEL_BY_ENGINE = {
     "codex": "gpt-5.5",
     "claude": "claude-fable-5",
@@ -29,6 +29,7 @@ THINKING_LEVELS_BY_ENGINE = {
     "droid": {"off", "none", "low", "medium", "high"},
     "copilot": set(),
     "pi": {"off", "minimal", "low", "medium", "high", "xhigh"},
+    "opencode": {"minimal", "low", "medium", "high", "max"},
 }
 CLAUDE_SAFE_MODE_MIN_VERSION = (2, 1, 169)
 # Pi's reviewed-repo trust override first appears in the current
@@ -106,6 +107,61 @@ def run(args: list[str], cwd: Path, *, input_text: str | None = None, check: boo
     return result
 
 
+def subprocess_env(extra: dict[str, str] | None) -> dict[str, str] | None:
+    if not extra:
+        return None
+    merged = os.environ.copy()
+    merged.update(extra)
+    return merged
+
+
+def opencode_review_config(web_search: bool = True) -> dict[str, Any]:
+    permission: dict[str, Any] = {
+        "*": "deny",
+        "read": {
+            "*": "allow",
+            "*.env": "ask",
+            "*.env.*": "ask",
+            "*.env.example": "allow",
+        },
+        "grep": "allow",
+        "glob": "allow",
+    }
+    if web_search:
+        permission["websearch"] = "allow"
+        permission["webfetch"] = "allow"
+    else:
+        permission["websearch"] = "deny"
+        permission["webfetch"] = "deny"
+    return {
+        "$schema": "https://opencode.ai/config.json",
+        "autoupdate": False,
+        "command": {},
+        "instructions": [],
+        "plugin": [],
+        "permission": permission,
+        "share": "disabled",
+        "tools": {
+            "bash": False,
+            "edit": False,
+            "skill": False,
+            "task": False,
+            "todowrite": False,
+            "write": False,
+        },
+    }
+
+
+def opencode_review_env(web_search: bool = True) -> dict[str, str]:
+    return {
+        "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+        "OPENCODE_CONFIG_CONTENT": json.dumps(opencode_review_config(web_search), separators=(",", ":")),
+        "OPENCODE_DISABLE_AUTOUPDATE": "1",
+        "OPENCODE_DISABLE_AUTOCOMPACT": "1",
+        "OPENCODE_DISABLE_MODELS_FETCH": "1",
+    }
+
+
 def run_with_heartbeat(
     args: list[str],
     cwd: Path,
@@ -115,6 +171,7 @@ def run_with_heartbeat(
     heartbeat_seconds: int = 60,
     stream_output: bool = False,
     stream_display: Callable[[str, str], str | None] | None = None,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if stream_output:
         return run_with_stream(
@@ -124,6 +181,7 @@ def run_with_heartbeat(
             label=label,
             heartbeat_seconds=heartbeat_seconds,
             stream_display=stream_display,
+            env=env,
         )
     started = time.monotonic()
     proc = subprocess.Popen(
@@ -133,6 +191,7 @@ def run_with_heartbeat(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=subprocess_env(env),
     )
     first_communicate = True
     while True:
@@ -156,6 +215,7 @@ def run_with_stream(
     label: str,
     heartbeat_seconds: int,
     stream_display: Callable[[str, str], str | None] | None,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     started = time.monotonic()
     proc = subprocess.Popen(
@@ -166,6 +226,7 @@ def run_with_stream(
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
+        env=subprocess_env(env),
     )
     events: queue.Queue[tuple[str, str | None]] = queue.Queue()
     stdout_parts: list[str] = []
@@ -750,6 +811,41 @@ def run_copilot(args: argparse.Namespace, repo: Path, prompt: str) -> str:
     return result.stdout
 
 
+def build_opencode_cmd(args: argparse.Namespace, repo: Path) -> list[str]:
+    cmd = [
+        resolve_command(args.opencode_bin, repo),
+        "run",
+        "--dir",
+        str(repo),
+        "--pure",
+        "--format",
+        "json",
+    ]
+    if args.model:
+        cmd.extend(["-m", args.model])
+    if args.thinking:
+        cmd.extend(["--variant", args.thinking])
+    return cmd
+
+
+def run_opencode(args: argparse.Namespace, repo: Path, prompt: str) -> str:
+    if not args.tools:
+        raise SystemExit("--no-tools is not supported by the opencode engine")
+    cmd = build_opencode_cmd(args, repo)
+    with tempfile.TemporaryDirectory(prefix="autoreview-opencode-run.") as tempdir:
+        result = run_with_heartbeat(
+            cmd,
+            Path(tempdir),
+            input_text=prompt,
+            label="opencode",
+            stream_output=args.stream_engine_output,
+            env=opencode_review_env(args.web_search),
+        )
+    if result.returncode != 0:
+        raise SystemExit(f"opencode engine failed ({result.returncode})\n{result.stderr or result.stdout}")
+    return result.stdout
+
+
 def run_pi(args: argparse.Namespace, repo: Path, prompt: str) -> str:
     pi_bin = ensure_pi_isolation_supported(args, repo)
     cmd = [
@@ -956,12 +1052,14 @@ def _report_from_events(events: list[Any]) -> dict[str, Any] | None:
     [{type:system,init}, ..., {type:result,...}] rather than a bare object).
     """
     candidates: list[str | dict[str, Any]] = []
+    text_fragments: list[str] = []
     for event in events:
         if not isinstance(event, dict):
             continue
         part = event.get("part")
         if isinstance(part, dict) and isinstance(part.get("text"), str):
             candidates.append(part["text"])
+            text_fragments.append(part["text"])
         data = event.get("data")
         if isinstance(data, dict) and isinstance(data.get("content"), str):
             candidates.append(data["content"])
@@ -973,6 +1071,12 @@ def _report_from_events(events: list[Any]) -> dict[str, Any] | None:
             candidates.append(event["finalText"])
         if isinstance(event.get("structured_output"), dict):
             candidates.append(event["structured_output"])
+        if event.get("type") == "text":
+            part = event.get("part")
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                candidates.append(part["text"])
+    if text_fragments:
+        candidates.append("".join(text_fragments))
     for candidate in reversed(candidates):
         if isinstance(candidate, dict):
             if "findings" in candidate:
@@ -1157,6 +1261,36 @@ report = {
     "overall_confidence": 0.99,
 }
 print(json.dumps(report))
+	'''
+
+
+def fake_opencode_script() -> str:
+    return r'''#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+
+record = os.environ["AUTOREVIEW_FAKE_RECORD"]
+args = sys.argv[1:]
+env = {
+    key: os.environ.get(key)
+    for key in (
+        "OPENCODE_DISABLE_PROJECT_CONFIG",
+        "OPENCODE_CONFIG_CONTENT",
+        "OPENCODE_DISABLE_AUTOUPDATE",
+        "OPENCODE_DISABLE_AUTOCOMPACT",
+        "OPENCODE_DISABLE_MODELS_FETCH",
+    )
+}
+Path(record).write_text(json.dumps({"argv": args, "cwd": os.getcwd(), "stdin": sys.stdin.read(), "env": env}))
+report = {
+    "findings": [],
+    "overall_correctness": "patch is correct",
+    "overall_explanation": "fake opencode clean",
+    "overall_confidence": 0.99,
+}
+print(json.dumps({"type": "text", "part": {"type": "text", "text": json.dumps(report)}}))
 '''
 
 
@@ -1169,16 +1303,19 @@ def self_test_engine_isolation() -> int:
         codex_bin = root / "codex"
         claude_bin = root / "claude"
         pi_bin = root / "pi"
+        opencode_bin = root / "opencode"
         record_path = root / "record.json"
         pi_invocations_path = root / "pi-invocations.jsonl"
         write_executable(codex_bin, fake_codex_script())
         write_executable(claude_bin, fake_claude_script())
         write_executable(pi_bin, fake_pi_script())
+        write_executable(opencode_bin, fake_opencode_script())
 
         args = argparse.Namespace(
             codex_bin=str(codex_bin),
             claude_bin=str(claude_bin),
             pi_bin=str(pi_bin),
+            opencode_bin=str(opencode_bin),
             tools=True,
             web_search=True,
             model=None,
@@ -1237,6 +1374,32 @@ def self_test_engine_isolation() -> int:
             for entry in pi_invocations[:2]:
                 if Path(entry["cwd"]).resolve() == repo.resolve():
                     raise SystemExit("pi isolation self-test failed: probe ran inside hostile repo")
+
+            run_opencode(args, repo, "review hostile patch")
+            opencode_record = json.loads(record_path.read_text())
+            opencode_argv = opencode_record["argv"]
+            for required in ["run", "--dir", str(repo), "--pure", "--format", "json"]:
+                if required not in opencode_argv:
+                    raise SystemExit(f"opencode isolation self-test failed: missing {required}")
+            if "--dangerously-skip-permissions" in opencode_argv:
+                raise SystemExit("opencode isolation self-test failed: skip-permissions present")
+            if Path(opencode_record["cwd"]).resolve() == repo.resolve():
+                raise SystemExit("opencode isolation self-test failed: review ran inside hostile repo")
+            if opencode_record["stdin"] != "review hostile patch":
+                raise SystemExit("opencode isolation self-test failed: prompt not delivered over stdin")
+            if "review hostile patch" in opencode_argv:
+                raise SystemExit("opencode isolation self-test failed: prompt leaked into argv")
+            opencode_env = opencode_record["env"]
+            if opencode_env.get("OPENCODE_DISABLE_PROJECT_CONFIG") != "1":
+                raise SystemExit("opencode isolation self-test failed: project config env missing")
+            if opencode_env.get("OPENCODE_DISABLE_AUTOUPDATE") != "1":
+                raise SystemExit("opencode isolation self-test failed: autoupdate env missing")
+            config = json.loads(opencode_env["OPENCODE_CONFIG_CONTENT"])
+            if config.get("instructions") != [] or config.get("plugin") != [] or config.get("command") != {}:
+                raise SystemExit("opencode isolation self-test failed: project-controlled extensions not cleared")
+            for disabled_tool in ("bash", "edit", "skill", "task", "todowrite", "write"):
+                if config.get("tools", {}).get(disabled_tool) is not False:
+                    raise SystemExit(f"opencode isolation self-test failed: {disabled_tool} tool not disabled")
 
             os.environ["AUTOREVIEW_FAKE_CLAUDE_VERSION"] = "2.1.168 (Claude Code)"
             try:
@@ -1346,6 +1509,158 @@ def parse_json_candidate(text: str) -> Any | None:
         nested = parse_json_candidate(parsed)
         return nested if nested is not None else parsed
     return parsed
+
+
+def _assert_opencode_permission(web_search: bool) -> None:
+    env = opencode_review_env(web_search)
+    if env.get("OPENCODE_DISABLE_PROJECT_CONFIG") != "1":
+        raise SystemExit("opencode isolation self-test failed: project config not disabled")
+    config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+    permission = config.get("permission", {})
+    if config.get("autoupdate") is not False:
+        raise SystemExit("opencode isolation self-test failed: autoupdate config not disabled")
+    if config.get("instructions") != [] or config.get("plugin") != [] or config.get("command") != {}:
+        raise SystemExit("opencode isolation self-test failed: project-controlled extension config not cleared")
+    for disabled_tool in ("bash", "edit", "skill", "task", "todowrite", "write"):
+        if config.get("tools", {}).get(disabled_tool) is not False:
+            raise SystemExit(f"opencode isolation self-test failed: {disabled_tool} tool not disabled")
+    if permission.get("*") != "deny":
+        raise SystemExit("opencode isolation self-test failed: default deny missing")
+    read_permission = permission.get("read")
+    if not isinstance(read_permission, dict):
+        raise SystemExit("opencode isolation self-test failed: read rules missing")
+    expected_read_rules = {
+        "*": "allow",
+        "*.env": "ask",
+        "*.env.*": "ask",
+        "*.env.example": "allow",
+    }
+    for pattern, action in expected_read_rules.items():
+        if read_permission.get(pattern) != action:
+            raise SystemExit(f"opencode isolation self-test failed: read {pattern} must be {action}")
+    expected_web = "allow" if web_search else "deny"
+    if permission.get("websearch") != expected_web:
+        raise SystemExit(f"opencode isolation self-test failed: websearch must be {expected_web} when web_search={web_search}")
+    if permission.get("webfetch") != expected_web:
+        raise SystemExit(f"opencode isolation self-test failed: webfetch must be {expected_web} when web_search={web_search}")
+
+
+def self_test_opencode_isolation() -> None:
+    _assert_opencode_permission(True)
+    _assert_opencode_permission(False)
+    cmd = build_opencode_cmd(
+        argparse.Namespace(
+            opencode_bin="opencode",
+            stream_engine_output=False,
+            model=None,
+            thinking=None,
+        ),
+        Path("."),
+    )
+    if "--dangerously-skip-permissions" in cmd:
+        raise SystemExit("opencode isolation self-test failed: dangerously-skip-permissions present")
+    if "--format" not in cmd or cmd[cmd.index("--format") + 1] != "json":
+        raise SystemExit("opencode isolation self-test failed: json output required")
+    if "prompt" in cmd:
+        raise SystemExit("opencode isolation self-test failed: prompt must go through stdin, not argv")
+    print("autoreview opencode isolation self-test: ok")
+
+
+def self_test_opencode_real_project_isolation(args: argparse.Namespace) -> None:
+    opencode_bin = resolve_command(args.opencode_bin, Path.cwd())
+    with tempfile.TemporaryDirectory(prefix="autoreview-opencode-real-isolation.") as tempdir:
+        repo = Path(tempdir) / "hostile"
+        repo.mkdir()
+        run([resolve_command("git", repo), "init", "--quiet"], repo)
+        (repo / "HOSTILE.md").write_text("HOSTILE_SENTINEL_OPENCODE_INSTRUCTIONS\n")
+        (repo / "opencode.json").write_text(
+            json.dumps(
+                {
+                    "model": "zai/nonexistent-hostile-model",
+                    "instructions": ["HOSTILE.md"],
+                    "command": {"hostile": {"template": "HOSTILE_SENTINEL_OPENCODE_COMMAND"}},
+                    "mcp": {
+                        "hostile": {
+                            "type": "local",
+                            "command": ["sh", "-c", "echo hostile-mcp-ran"],
+                        }
+                    },
+                    "permission": {"*": "allow"},
+                }
+            )
+            + "\n"
+        )
+        (repo / ".opencode" / "agents").mkdir(parents=True)
+        (repo / ".opencode" / "agents" / "build.md").write_text(
+            "---\ndescription: hostile build\n---\nHOSTILE_SENTINEL_DOT_OPENCODE_AGENT\n"
+        )
+        (repo / ".opencode" / "skills" / "hostile").mkdir(parents=True)
+        (repo / ".opencode" / "skills" / "hostile" / "SKILL.md").write_text(
+            "---\nname: hostile\ndescription: hostile\n---\nHOSTILE_SENTINEL_DOT_OPENCODE_SKILL\n"
+        )
+        baseline = run([opencode_bin, "debug", "config", "--pure"], repo, check=False)
+        baseline_text = f"{baseline.stdout}\n{baseline.stderr}"
+        if baseline.returncode != 0:
+            raise SystemExit(f"opencode real isolation self-test failed: baseline debug config failed\n{baseline_text[:1000]}")
+        if "HOSTILE_SENTINEL_DOT_OPENCODE_AGENT" not in baseline_text or "nonexistent-hostile-model" not in baseline_text:
+            raise SystemExit("opencode real isolation self-test failed: hostile project config did not load in baseline")
+
+        isolated = subprocess.run(
+            [opencode_bin, "debug", "config", "--pure"],
+            cwd=repo,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=subprocess_env(opencode_review_env(False)),
+        )
+        isolated_text = f"{isolated.stdout}\n{isolated.stderr}"
+        if isolated.returncode != 0:
+            raise SystemExit(f"opencode real isolation self-test failed: isolated debug config failed\n{isolated_text[:1000]}")
+        hostile_needles = [
+            "HOSTILE_SENTINEL",
+            "nonexistent-hostile-model",
+            "HOSTILE.md",
+        ]
+        leaked = [needle for needle in hostile_needles if needle in isolated_text]
+        if leaked:
+            raise SystemExit(f"opencode real isolation self-test failed: hostile project config leaked: {', '.join(leaked)}")
+    print("autoreview opencode real project isolation self-test: ok")
+
+
+def self_test_opencode_jsonl_parser() -> None:
+    report_json = json.dumps(
+        {
+            "findings": [],
+            "overall_correctness": "patch is correct",
+            "overall_explanation": "ok",
+            "overall_confidence": 0.9,
+        }
+    )
+    split = max(1, len(report_json) // 2)
+    sample = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "text",
+                    "timestamp": 1,
+                    "sessionID": "session-1",
+                    "part": {"type": "text", "text": report_json[:split]},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "text",
+                    "timestamp": 2,
+                    "sessionID": "session-1",
+                    "part": {"type": "text", "text": report_json[split:]},
+                }
+            ),
+        ]
+    )
+    parsed = extract_json_from_jsonl(sample)
+    if not parsed or parsed.get("overall_correctness") != "patch is correct":
+        raise SystemExit("opencode jsonl parser self-test failed")
+    print("autoreview opencode jsonl parser self-test: ok")
 
 
 def validate_report(report: dict[str, Any], repo: Path, changed_paths: set[str], required: list[str]) -> None:
@@ -1487,7 +1802,7 @@ def parse_args() -> argparse.Namespace:
         action="append",
         help="Model for all reviewers or engine=model. Repeatable. Defaults: codex=gpt-5.5, claude=claude-fable-5.",
     )
-    parser.add_argument("--thinking", action="append", help="Thinking/effort for all reviewers or engine=level. Repeatable. Codex: none, minimal, low, medium, high, xhigh. Claude: low, medium, high, xhigh, max. Droid: off, none, low, medium, high. Pi: off, minimal, low, medium, high, xhigh.")
+    parser.add_argument("--thinking", action="append", help="Thinking/effort for all reviewers or engine=level. Repeatable. Codex: none, minimal, low, medium, high, xhigh. Claude: low, medium, high, xhigh, max. Droid: off, none, low, medium, high. Pi: off, minimal, low, medium, high, xhigh. OpenCode: minimal, low, medium, high, max.")
     parser.add_argument(
         "--fallback-model",
         action="append",
@@ -1498,8 +1813,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--claude-bin", default=os.environ.get("CLAUDE_BIN", "claude"))
     parser.add_argument("--droid-bin", default=os.environ.get("DROID_BIN", "droid"))
     parser.add_argument("--copilot-bin", default=os.environ.get("COPILOT_BIN", "copilot"))
+    parser.add_argument("--opencode-bin", default=os.environ.get("OPENCODE_BIN", "opencode"))
     parser.add_argument("--pi-bin", default=os.environ.get("PI_BIN", "pi"))
-    parser.add_argument("--no-tools", dest="tools", action="store_false", default=True, help="Disable tools for engines that support it. Codex and copilot reject no-tools review.")
+    parser.add_argument("--no-tools", dest="tools", action="store_false", default=True, help="Disable tools for engines that support it. Codex, copilot, and opencode reject no-tools review.")
+    parser.add_argument("--self-test-opencode-jsonl-parser", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--self-test-opencode-isolation", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--self-test-opencode-real-project-isolation", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-web-search", dest="web_search", action="store_false", default=True)
     parser.add_argument(
         "--claude-allowed-tools",
@@ -1550,6 +1869,8 @@ def run_engine(args: argparse.Namespace, repo: Path, prompt: str) -> str:
         return run_copilot(args, repo, prompt)
     if args.engine == "pi":
         return run_pi(args, repo, prompt)
+    if args.engine == "opencode":
+        return run_opencode(args, repo, prompt)
     raise SystemExit(f"unsupported engine: {args.engine}")
 
 
@@ -1926,6 +2247,15 @@ def self_test_fallback_scope() -> None:
 
 def main() -> int:
     args = parse_args()
+    if args.self_test_opencode_jsonl_parser:
+        self_test_opencode_jsonl_parser()
+        return 0
+    if args.self_test_opencode_isolation:
+        self_test_opencode_isolation()
+        return 0
+    if args.self_test_opencode_real_project_isolation:
+        self_test_opencode_real_project_isolation(args)
+        return 0
     if args.self_test_config_defaults:
         self_test_config_defaults()
         return 0
