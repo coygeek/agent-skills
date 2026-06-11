@@ -1359,7 +1359,7 @@ def run_engine(args: argparse.Namespace, repo: Path, prompt: str) -> str:
 
 
 def env_defaults_for(env_suffix: str) -> tuple[str | None, dict[str, str]]:
-    env_key = env_suffix.upper()
+    env_key = env_suffix.replace("-", "_").upper()
     global_value = os.environ.get(f"AUTOREVIEW_{env_key}")
     if global_value is not None:
         global_value = global_value.strip() or None
@@ -1417,7 +1417,7 @@ def reviewer_args(args: argparse.Namespace) -> list[argparse.Namespace]:
     global_fallback, fallback_by_engine = parse_keyed_options(args.fallback_model, "fallback-model")
     env_global_model, env_model_by_engine = env_defaults_for("model")
     env_global_thinking, env_thinking_by_engine = env_defaults_for("thinking")
-    env_global_fallback, env_fallback_by_engine = env_defaults_for("fallback_model")
+    env_global_fallback, env_fallback_by_engine = env_defaults_for("fallback-model")
     reviewers: list[tuple[str, str | None, str | None]] = []
     if args.reviewers:
         tokens = [token.strip() for token in args.reviewers.split(",") if token.strip()]
@@ -1433,7 +1433,12 @@ def reviewer_args(args: argparse.Namespace) -> list[argparse.Namespace]:
     else:
         reviewers = [(args.engine, None, None)]
 
-    if global_fallback and not any(engine == "claude" for engine, _, _ in reviewers):
+    selected_engines = {engine for engine, _, _ in reviewers}
+    unused_fallback_engines = set(fallback_by_engine) - selected_engines
+    if unused_fallback_engines:
+        engine_list = ", ".join(sorted(unused_fallback_engines))
+        raise SystemExit(f"--fallback-model specified for unselected reviewer: {engine_list}")
+    if (global_fallback or fallback_by_engine) and "claude" not in selected_engines:
         raise SystemExit("--fallback-model is only supported for claude; no claude reviewer selected")
 
     seen: set[str] = set()
@@ -1572,9 +1577,10 @@ def preserve_env(keys: list[str]):
     saved = {key: os.environ.get(key) for key in keys}
 
     class EnvGuard:
-        def __enter__(self) -> None:
+        def __enter__(self):
             for key in keys:
                 os.environ.pop(key, None)
+            return self
 
         def __exit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> None:
             for key, value in saved.items():
@@ -1664,6 +1670,12 @@ def self_test_fallback_scope() -> None:
             raise SystemExit("self-test fallback scope failed: global fallback without Claude should be rejected")
         except SystemExit as exc:
             if "no claude reviewer selected" not in str(exc):
+                raise
+        try:
+            reviewer_args(reviewer_test_args(engine="codex", fallback_model=["claude=cli-claude"]))
+            raise SystemExit("self-test fallback scope failed: fallback for unselected Claude reviewer should be rejected")
+        except SystemExit as exc:
+            if "unselected reviewer: claude" not in str(exc):
                 raise
         inline = reviewer_args(
             reviewer_test_args(
