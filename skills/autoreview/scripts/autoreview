@@ -43,6 +43,7 @@ REFERENCE_MODES = {
     "local_path": "prompt_manifest",
     "git": "prompt_manifest",
 }
+REFERENCE_FILE_CONTENT_LIMIT = 20000
 
 
 SCHEMA: dict[str, Any] = {
@@ -147,13 +148,19 @@ def reference_has_native_directory(reference: "ReviewReference", *, assume_unmat
     return assume_unmaterialized_git and reference.kind == "git" and reference.runtime_path is None
 
 
-def all_references_have_directory(
+def reference_has_native_access(reference: "ReviewReference", *, assume_unmaterialized_git: bool = False) -> bool:
+    if reference_has_native_directory(reference, assume_unmaterialized_git=assume_unmaterialized_git):
+        return True
+    return reference.kind == "local_path" and reference.path is not None and reference.path.is_file()
+
+
+def all_references_have_native_access(
     references: list["ReviewReference"],
     *,
     assume_unmaterialized_git: bool = False,
 ) -> bool:
     return all(
-        reference_has_native_directory(
+        reference_has_native_access(
             reference,
             assume_unmaterialized_git=assume_unmaterialized_git,
         )
@@ -1026,19 +1033,19 @@ def reference_mode_for_engine(args: argparse.Namespace, repo: Path) -> str:
         return "none"
     engine = args.engine
     assume_git_dirs = bool(getattr(args, "dry_run", False))
-    if engine == "opencode" and all_references_have_directory(
+    if engine == "opencode" and all_references_have_native_access(
         references,
         assume_unmaterialized_git=assume_git_dirs,
     ):
         return "native_config"
-    if engine == "claude" and all_references_have_directory(
+    if engine == "claude" and all_references_have_native_access(
         references,
         assume_unmaterialized_git=assume_git_dirs,
     ):
         return "native_add_dir"
     if (
         engine == "codex"
-        and all_references_have_directory(
+        and all_references_have_native_access(
             references,
             assume_unmaterialized_git=assume_git_dirs,
         )
@@ -1077,6 +1084,20 @@ def references_metadata_by_engine(
     return result
 
 
+def render_reference_file_content(path: Path) -> list[str]:
+    with path.open("r", encoding="utf-8", errors="replace") as file:
+        content = file.read(REFERENCE_FILE_CONTENT_LIMIT + 1)
+    truncated = len(content) > REFERENCE_FILE_CONTENT_LIMIT
+    if truncated:
+        content = content[:REFERENCE_FILE_CONTENT_LIMIT]
+    return [
+        f"  file_content_truncated={'true' if truncated else 'false'}",
+        "  ```text",
+        textwrap.indent(content.rstrip("\n"), "  "),
+        "  ```",
+    ]
+
+
 def render_reference_manifest(references: list[ReviewReference], strict: bool) -> str:
     if not references:
         return ""
@@ -1098,6 +1119,8 @@ def render_reference_manifest(references: list[ReviewReference], strict: bool) -
                 f"- alias={reference.alias} kind={reference.kind} mode={reference.mode} "
                 f"access={reference.access}{hidden} location=<hidden> cite=alias-only"
             )
+            if reference.kind == "local_path" and reference.path is not None and reference.path.is_file():
+                lines.extend(render_reference_file_content(reference.path))
             continue
         location = ""
         if reference.kind == "local_path" and reference.path is not None:
@@ -1113,6 +1136,8 @@ def render_reference_manifest(references: list[ReviewReference], strict: bool) -
             f"- alias={reference.alias} kind={reference.kind} mode={reference.mode} "
             f"access={reference.access}{hidden} {location}{description}".rstrip()
         )
+        if reference.kind == "local_path" and reference.path is not None and reference.path.is_file():
+            lines.extend(render_reference_file_content(reference.path))
     return "\n".join(lines)
 
 
@@ -2506,6 +2531,8 @@ def self_test_references() -> None:
                 "read-only",
                 "not part of the reviewed diff",
                 "hidden reference, cite only the alias",
+                "file_content_truncated=false",
+                "notes",
                 "Strict reference mode: on",
             ):
                 if needle not in manifest:
@@ -2564,15 +2591,10 @@ def self_test_references() -> None:
                 effective_strict_references=False,
                 codex_add_dir_supported=True,
             )
-            if reference_mode_for_engine(file_mixed_args, repo) != "prompt_manifest":
-                raise SystemExit("reference self-test failed: file references should use prompt_manifest")
+            if reference_mode_for_engine(file_mixed_args, repo) != "native_add_dir":
+                raise SystemExit("reference self-test failed: file references should combine embedded and native access")
             file_mixed_args.effective_strict_references = True
-            try:
-                enforce_reference_mode(file_mixed_args, repo)
-                raise SystemExit("reference self-test failed: strict file reference accepted native mode")
-            except SystemExit as exc:
-                if "strict mode" not in str(exc):
-                    raise
+            enforce_reference_mode(file_mixed_args, repo)
             codex_unsupported_args = argparse.Namespace(
                 engine="codex",
                 review_references=directory_refs,
