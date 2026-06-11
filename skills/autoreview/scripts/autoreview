@@ -1086,11 +1086,19 @@ def render_reference_manifest(references: list[ReviewReference], strict: bool) -
         "Use these references as read-only context only.",
         "They are not part of the reviewed diff, and they must not be reported against unless the changed code depends on them.",
         "Do not modify reference files or treat reference contents as patch content.",
-        "When a finding relies on a reference, cite the reference alias and the relevant path or repository.",
+        "When a finding relies on a non-hidden reference, cite the reference alias and the relevant path or repository.",
+        "When a finding relies on a hidden reference, cite only the alias and do not repeat its location or description.",
         f"Strict reference mode: {'on' if strict else 'off'}",
         "",
     ]
     for reference in references:
+        hidden = " hidden=true" if reference.hidden else " hidden=false"
+        if reference.hidden:
+            lines.append(
+                f"- alias={reference.alias} kind={reference.kind} mode={reference.mode} "
+                f"access={reference.access}{hidden} location=<hidden> cite=alias-only"
+            )
+            continue
         location = ""
         if reference.kind == "local_path" and reference.path is not None:
             location = f"path={reference.path}"
@@ -1101,7 +1109,6 @@ def render_reference_manifest(references: list[ReviewReference], strict: bool) -
             if reference.runtime_path:
                 location += f" runtime_path={reference.runtime_path}"
         description = f" description={reference.description}" if reference.description else ""
-        hidden = " hidden=true" if reference.hidden else " hidden=false"
         lines.append(
             f"- alias={reference.alias} kind={reference.kind} mode={reference.mode} "
             f"access={reference.access}{hidden} {location}{description}".rstrip()
@@ -2498,10 +2505,17 @@ def self_test_references() -> None:
                 "alias=gitdocs",
                 "read-only",
                 "not part of the reviewed diff",
+                "hidden reference, cite only the alias",
                 "Strict reference mode: on",
             ):
                 if needle not in manifest:
                     raise SystemExit(f"reference self-test failed: manifest missing {needle}")
+            hidden_line = next(line for line in manifest.splitlines() if "alias=gitdocs" in line)
+            for leaked in ("repository=", "runtime_path=", "Git fixture", str(git_ref)):
+                if leaked in hidden_line:
+                    raise SystemExit(f"reference self-test failed: hidden manifest leaked {leaked}")
+            if "location=<hidden>" not in hidden_line or "cite=alias-only" not in hidden_line:
+                raise SystemExit("reference self-test failed: hidden manifest is not alias-only")
             prompt = build_prompt(repo, "local", None, "diff", "", "", manifest)
             if "# Review References" not in prompt or "# Change Bundle" not in prompt:
                 raise SystemExit("reference self-test failed: prompt manifest not included")
