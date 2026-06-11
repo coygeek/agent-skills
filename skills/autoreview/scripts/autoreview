@@ -130,6 +130,8 @@ def reference_runtime_directory(reference: "ReviewReference") -> Path | None:
         candidate = reference.runtime_path
     if candidate is not None and candidate.is_dir():
         return candidate
+    if candidate is not None and candidate.is_file():
+        return candidate.parent
     return None
 
 
@@ -151,7 +153,7 @@ def reference_has_native_directory(reference: "ReviewReference", *, assume_unmat
 def reference_has_native_access(reference: "ReviewReference", *, assume_unmaterialized_git: bool = False) -> bool:
     if reference_has_native_directory(reference, assume_unmaterialized_git=assume_unmaterialized_git):
         return True
-    return reference.kind == "local_path" and reference.path is not None and reference.path.is_file()
+    return False
 
 
 def all_references_have_native_access(
@@ -824,6 +826,10 @@ def validate_local_reference_path(path: Path, repo: Path) -> Path:
     reason = risky_reference_path(resolved, Path.home())
     if reason:
         raise SystemExit(f"unsafe reference path {resolved}: {reason}")
+    if resolved.is_file():
+        parent_reason = risky_reference_path(resolved.parent, Path.home())
+        if parent_reason:
+            raise SystemExit(f"unsafe reference file parent {resolved.parent}: {parent_reason}")
     return resolved
 
 
@@ -2521,8 +2527,11 @@ def self_test_references() -> None:
             if is_within(by_alias["gitdocs"].runtime_path, repo.resolve()):
                 raise SystemExit("reference self-test failed: git materialized inside reviewed repo")
             directory_refs = [by_alias["clidocs"], by_alias["pathdocs"], by_alias["gitdocs"]]
-            if by_alias["filedocs"].path in native_reference_directories(refs):
+            native_dirs = native_reference_directories(refs)
+            if by_alias["filedocs"].path in native_dirs:
                 raise SystemExit("reference self-test failed: file reference treated as native directory")
+            if by_alias["filedocs"].path.parent not in native_dirs:
+                raise SystemExit("reference self-test failed: file reference parent not exposed natively")
             manifest = render_reference_manifest(refs, strict)
             for needle in (
                 "# Review References",
