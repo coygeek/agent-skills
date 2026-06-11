@@ -569,15 +569,18 @@ class ReviewReference:
     access: str = "read-only"
     mode: str = "prompt_manifest"
 
-    def metadata(self) -> dict[str, Any]:
+    def metadata(self, *, redact_hidden: bool = False) -> dict[str, Any]:
         data: dict[str, Any] = {
             "alias": self.alias,
             "kind": self.kind,
-            "description": self.description,
             "hidden": self.hidden,
             "access": self.access,
             "mode": self.mode,
         }
+        if self.hidden and redact_hidden:
+            data["redacted"] = True
+            return data
+        data["description"] = self.description
         if self.path is not None:
             data["path"] = str(self.path)
         if self.repository is not None:
@@ -738,11 +741,44 @@ def risky_reference_path(path: Path, home: Path | None) -> str | None:
     name = path.name
     if name == ".env" or name.startswith(".env."):
         return "environment files are not allowed as references"
+    broad_roots: list[tuple[Path, str]] = []
+    if path.anchor:
+        broad_roots.append((Path(path.anchor), "filesystem root"))
+    for raw in (
+        "/Users",
+        "/home",
+        "/etc",
+        "/tmp",
+        "/private",
+        "/private/tmp",
+        "/var",
+        "/usr",
+        "/opt",
+        "/System",
+        "/Library",
+        "/Applications",
+    ):
+        broad_roots.append((Path(raw), f"{raw}"))
     if home is None:
-        return None
-    try:
-        resolved_home = home.resolve()
-    except OSError:
+        resolved_home = None
+    else:
+        try:
+            resolved_home = home.resolve()
+            broad_roots.append((resolved_home.parent, "home parent directory"))
+        except OSError:
+            resolved_home = None
+    seen_broad_roots: set[Path] = set()
+    for broad_root, label in broad_roots:
+        try:
+            resolved_broad_root = broad_root.resolve()
+        except OSError:
+            continue
+        if resolved_broad_root in seen_broad_roots:
+            continue
+        seen_broad_roots.add(resolved_broad_root)
+        if path == resolved_broad_root:
+            return f"{label} is too broad to use as a reference"
+    if resolved_home is None:
         return None
     if path == resolved_home:
         return "home directory is too broad to use as a reference"
@@ -910,11 +946,16 @@ def materialize_git_references(references: list[ReviewReference], repo: Path, st
     return workspace
 
 
-def references_metadata(references: list[ReviewReference], strict: bool) -> dict[str, Any]:
+def references_metadata(
+    references: list[ReviewReference],
+    strict: bool,
+    *,
+    redact_hidden: bool = False,
+) -> dict[str, Any]:
     return {
         "strict": strict,
         "count": len(references),
-        "items": [reference.metadata() for reference in references],
+        "items": [reference.metadata(redact_hidden=redact_hidden) for reference in references],
     }
 
 
@@ -2365,6 +2406,15 @@ def self_test_references() -> None:
             metadata = references_metadata(refs, strict)
             if metadata["count"] != 4 or metadata["items"][0]["access"] != "read-only":
                 raise SystemExit("reference self-test failed: metadata shape invalid")
+            redacted_metadata = references_metadata(refs, strict, redact_hidden=True)
+            redacted_gitdocs = next(
+                item for item in redacted_metadata["items"] if item["alias"] == "gitdocs"
+            )
+            if not redacted_gitdocs.get("redacted"):
+                raise SystemExit("reference self-test failed: hidden metadata not marked redacted")
+            for sensitive_key in ("description", "path", "repository", "ref", "runtime_path"):
+                if sensitive_key in redacted_gitdocs:
+                    raise SystemExit(f"reference self-test failed: hidden metadata leaked {sensitive_key}")
             opencode_args = argparse.Namespace(
                 engine="opencode",
                 review_references=refs,
@@ -2441,6 +2491,21 @@ def self_test_references() -> None:
             raise SystemExit("reference self-test failed: reviewed-repo reference accepted")
         except SystemExit as exc:
             if "outside the reviewed repository" not in str(exc):
+                raise
+
+        try:
+            build_references(reference_test_args(reference=[f"root={Path('/')}"]), repo)
+            raise SystemExit("reference self-test failed: filesystem root reference accepted")
+        except SystemExit as exc:
+            if "too broad" not in str(exc):
+                raise
+
+        home_parent = Path.home().resolve().parent
+        try:
+            build_references(reference_test_args(reference=[f"homeparent={home_parent}"]), repo)
+            raise SystemExit("reference self-test failed: home parent reference accepted")
+        except SystemExit as exc:
+            if "too broad" not in str(exc):
                 raise
 
         try:
@@ -3106,7 +3171,13 @@ def main() -> int:
     print(f"web_search: {'on' if args.web_search else 'off'}")
     if references:
         print(f"references: {len(references)}")
-        print("references_metadata: " + json.dumps(references_metadata(references, strict_references), sort_keys=True))
+        print(
+            "references_metadata: "
+            + json.dumps(
+                references_metadata(references, strict_references, redact_hidden=not args.dry_run),
+                sort_keys=True,
+            )
+        )
         print("reference_modes_by_engine: " + json.dumps(references_metadata_by_engine(references, strict_references, reviewers, repo), sort_keys=True))
     display_ref = args.commit if target == "commit" else target_ref
     if display_ref:
