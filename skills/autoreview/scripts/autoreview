@@ -124,8 +124,12 @@ def subprocess_env(extra: dict[str, str] | None) -> dict[str, str] | None:
 
 def reference_runtime_directory(reference: "ReviewReference") -> Path | None:
     if reference.kind == "local_path":
-        return reference.path
-    return reference.runtime_path
+        candidate = reference.path
+    else:
+        candidate = reference.runtime_path
+    if candidate is not None and candidate.is_dir():
+        return candidate
+    return None
 
 
 def native_reference_directories(references: list["ReviewReference"]) -> list[Path]:
@@ -2299,9 +2303,8 @@ def self_test_references() -> None:
         (local_ref / "guide.md").write_text("guide\n")
         git_ref = root / "reference-repo"
         create_reference_source_repo(git_ref)
-        file_ref = root / "file-reference"
-        file_ref.mkdir()
-        (file_ref / "notes.md").write_text("notes\n")
+        file_ref = root / "file-reference.md"
+        file_ref.write_text("notes\n")
         references_file = root / "references.jsonc"
         references_file.write_text(
             textwrap.dedent(
@@ -2389,6 +2392,9 @@ def self_test_references() -> None:
                 raise SystemExit("reference self-test failed: git materialization outside temp workspace")
             if is_within(by_alias["gitdocs"].runtime_path, repo.resolve()):
                 raise SystemExit("reference self-test failed: git materialized inside reviewed repo")
+            directory_refs = [by_alias["clidocs"], by_alias["pathdocs"], by_alias["gitdocs"]]
+            if by_alias["filedocs"].path in native_reference_directories(refs):
+                raise SystemExit("reference self-test failed: file reference treated as native directory")
             manifest = render_reference_manifest(refs, strict)
             for needle in (
                 "# Review References",
@@ -2417,34 +2423,49 @@ def self_test_references() -> None:
                     raise SystemExit(f"reference self-test failed: hidden metadata leaked {sensitive_key}")
             opencode_args = argparse.Namespace(
                 engine="opencode",
-                review_references=refs,
+                review_references=directory_refs,
                 effective_strict_references=True,
             )
             if reference_mode_for_engine(opencode_args, repo) != "native_config":
                 raise SystemExit("reference self-test failed: opencode should use native_config")
-            opencode_config = opencode_review_config(False, refs)
-            if set(opencode_config.get("references", {})) != set(by_alias):
+            opencode_config = opencode_review_config(False, directory_refs)
+            if set(opencode_config.get("references", {})) != {reference.alias for reference in directory_refs}:
                 raise SystemExit("reference self-test failed: opencode references config aliases missing")
             if opencode_config["references"]["gitdocs"].get("hidden") is not True:
                 raise SystemExit("reference self-test failed: opencode hidden reference missing")
             claude_args = argparse.Namespace(
                 engine="claude",
-                review_references=refs,
+                review_references=directory_refs,
                 effective_strict_references=True,
             )
             if reference_mode_for_engine(claude_args, repo) != "native_add_dir":
                 raise SystemExit("reference self-test failed: claude should use native_add_dir")
             codex_args = argparse.Namespace(
                 engine="codex",
-                review_references=refs,
+                review_references=directory_refs,
                 effective_strict_references=True,
                 codex_add_dir_supported=True,
             )
             if reference_mode_for_engine(codex_args, repo) != "native_add_dir":
                 raise SystemExit("reference self-test failed: codex supported path should use native_add_dir")
-            codex_unsupported_args = argparse.Namespace(
+            file_mixed_args = argparse.Namespace(
                 engine="codex",
                 review_references=refs,
+                effective_strict_references=False,
+                codex_add_dir_supported=True,
+            )
+            if reference_mode_for_engine(file_mixed_args, repo) != "prompt_manifest":
+                raise SystemExit("reference self-test failed: file references should use prompt_manifest")
+            file_mixed_args.effective_strict_references = True
+            try:
+                enforce_reference_mode(file_mixed_args, repo)
+                raise SystemExit("reference self-test failed: strict file reference accepted native mode")
+            except SystemExit as exc:
+                if "strict mode" not in str(exc):
+                    raise
+            codex_unsupported_args = argparse.Namespace(
+                engine="codex",
+                review_references=directory_refs,
                 effective_strict_references=False,
                 codex_add_dir_supported=False,
             )
