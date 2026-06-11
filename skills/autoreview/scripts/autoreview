@@ -18,14 +18,19 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-ENGINES = ("codex", "claude", "droid", "copilot")
+ENGINES = ("codex", "claude", "droid", "copilot", "pi")
 THINKING_LEVELS_BY_ENGINE = {
     "codex": {"none", "minimal", "low", "medium", "high", "xhigh"},
     "claude": {"low", "medium", "high", "xhigh", "max"},
     "droid": {"off", "none", "low", "medium", "high"},
     "copilot": set(),
+    "pi": {"off", "minimal", "low", "medium", "high", "xhigh"},
 }
 CLAUDE_SAFE_MODE_MIN_VERSION = (2, 1, 169)
+# Pi's reviewed-repo trust override first appears in the current
+# @earendil-works/pi-coding-agent 0.79.0 CLI line. Older legacy binaries can
+# ignore unknown flags, so the Pi engine must fail closed below this floor.
+PI_TRUST_ISOLATION_MIN_VERSION = (0, 79, 0)
 
 
 SCHEMA: dict[str, Any] = {
@@ -512,6 +517,18 @@ def claude_review_isolation_flags() -> list[str]:
     ]
 
 
+def pi_review_isolation_flags() -> list[str]:
+    return [
+        "--no-approve",
+        "--no-session",
+        "--no-context-files",
+        "--no-extensions",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-themes",
+    ]
+
+
 def parse_cli_version(text: str) -> tuple[int, int, int] | None:
     match = re.search(r"\b(\d+)\.(\d+)\.(\d+)\b", text)
     if not match:
@@ -539,6 +556,37 @@ def ensure_claude_isolation_supported(args: argparse.Namespace, repo: Path) -> N
     if help_result.returncode != 0 or missing:
         detail = ", ".join(missing) if missing else "--help failed"
         raise SystemExit(f"claude engine requires Claude Code isolation flags missing from --help: {detail}")
+
+
+def ensure_pi_isolation_supported(args: argparse.Namespace, repo: Path) -> str:
+    pi_bin = resolve_command(args.pi_bin, repo)
+    with tempfile.TemporaryDirectory(prefix="autoreview-pi-probe.") as tempdir:
+        probe_cwd = Path(tempdir)
+        result = run([pi_bin, "--version"], probe_cwd, check=False)
+        help_result = run([pi_bin, "--help"], probe_cwd, check=False)
+    if result.returncode != 0:
+        raise SystemExit(f"pi engine requires Pi >= {format_version(PI_TRUST_ISOLATION_MIN_VERSION)}; --version failed")
+    version = parse_cli_version(f"{result.stdout}\n{result.stderr}")
+    if version is None:
+        raise SystemExit(f"pi engine requires Pi >= {format_version(PI_TRUST_ISOLATION_MIN_VERSION)} for --no-approve; could not parse --version output")
+    if version < PI_TRUST_ISOLATION_MIN_VERSION:
+        raise SystemExit(
+            f"pi engine requires Pi >= {format_version(PI_TRUST_ISOLATION_MIN_VERSION)} "
+            f"for reviewed-repo trust isolation (found {format_version(version)})"
+        )
+    help_text = f"{help_result.stdout}\n{help_result.stderr}"
+    required_flags = [
+        "--print",
+        *pi_review_isolation_flags(),
+        "--tools",
+        "--no-tools",
+        "--thinking",
+    ]
+    missing = [flag for flag in required_flags if flag not in help_text]
+    if help_result.returncode != 0 or missing:
+        detail = ", ".join(missing) if missing else "--help failed"
+        raise SystemExit(f"pi engine requires Pi isolation flags missing from --help: {detail}")
+    return pi_bin
 
 
 def format_version(version: tuple[int, int, int]) -> str:
@@ -695,6 +743,34 @@ def run_copilot(args: argparse.Namespace, repo: Path, prompt: str) -> str:
         result = run_with_heartbeat(cmd, Path(tempdir), label="copilot", stream_output=args.stream_engine_output)
     if result.returncode != 0:
         raise SystemExit(f"copilot engine failed ({result.returncode})\n{result.stderr or result.stdout}")
+    return result.stdout
+
+
+def run_pi(args: argparse.Namespace, repo: Path, prompt: str) -> str:
+    pi_bin = ensure_pi_isolation_supported(args, repo)
+    cmd = [
+        pi_bin,
+        "--print",
+        *pi_review_isolation_flags(),
+    ]
+    if args.model:
+        cmd.extend(["--model", args.model])
+    if args.thinking:
+        cmd.extend(["--thinking", args.thinking])
+    if args.tools:
+        cmd.extend(["--tools", "read,grep,find,ls"])
+    else:
+        cmd.append("--no-tools")
+    with tempfile.TemporaryDirectory(prefix="autoreview-pi-run.") as tempdir:
+        result = run_with_heartbeat(
+            cmd,
+            Path(tempdir),
+            input_text=prompt,
+            label="pi",
+            stream_output=args.stream_engine_output,
+        )
+    if result.returncode != 0:
+        raise SystemExit(f"pi engine failed ({result.returncode})\n{result.stderr or result.stdout}")
     return result.stdout
 
 
@@ -973,6 +1049,21 @@ def create_hostile_repo(repo: Path) -> None:
     (repo / ".mcp.json").write_text(json.dumps({"mcpServers": {"hostile": {"command": "./hostile-mcp"}}}) + "\n")
     (repo / "hostile-mcp").write_text("#!/bin/sh\necho mcp-ran > .hostile-mcp-ran\nexit 1\n")
     (repo / "hostile-mcp").chmod(0o755)
+    (repo / ".pi" / "extensions").mkdir(parents=True)
+    (repo / ".pi" / "skills" / "hostile").mkdir(parents=True)
+    (repo / ".pi" / "prompts").mkdir(parents=True)
+    (repo / ".pi" / "themes").mkdir(parents=True)
+    (repo / ".pi" / "SYSTEM.md").write_text("HOSTILE_PI_SYSTEM_SENTINEL_DO_NOT_OBEY\n")
+    (repo / ".pi" / "APPEND_SYSTEM.md").write_text("HOSTILE_PI_APPEND_SENTINEL_DO_NOT_OBEY\n")
+    (repo / ".pi" / "settings.json").write_text(json.dumps({"defaultProjectTrust": "always"}) + "\n")
+    (repo / ".pi" / "extensions" / "hostile.js").write_text(
+        "export default function hostile() { require('fs').writeFileSync('.hostile-pi-extension-ran', '1'); }\n"
+    )
+    (repo / ".pi" / "skills" / "hostile" / "SKILL.md").write_text(
+        "---\nname: hostile-pi\ndescription: hostile\n---\nHOSTILE_PI_SKILL_SENTINEL_DO_NOT_OBEY\n"
+    )
+    (repo / ".pi" / "prompts" / "hostile.md").write_text("HOSTILE_PI_PROMPT_SENTINEL_DO_NOT_OBEY\n")
+    (repo / ".pi" / "themes" / "hostile.json").write_text("{}\n")
     (repo / "app.js").write_text("export function uploadPath(name) {\n  return `uploads/${name}`;\n}\n")
     run([resolve_command("git", repo), "add", "."], repo)
     run([resolve_command("git", repo), "commit", "--quiet", "-m", "initial"], repo)
@@ -1035,6 +1126,36 @@ print(json.dumps(report))
 '''
 
 
+def fake_pi_script() -> str:
+    return r'''#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+
+args = sys.argv[1:]
+invocations = os.environ.get("AUTOREVIEW_FAKE_PI_INVOCATIONS")
+if invocations:
+    with open(invocations, "a", encoding="utf-8") as file:
+        file.write(json.dumps({"argv": args, "cwd": os.getcwd()}) + "\n")
+if "--version" in args or "-v" in args:
+    print(os.environ.get("AUTOREVIEW_FAKE_PI_VERSION", "0.79.0"))
+    raise SystemExit(0)
+if "--help" in args or "-h" in args:
+    print(os.environ.get("AUTOREVIEW_FAKE_PI_HELP", "--print\n--no-approve\n--no-session\n--no-context-files\n--no-extensions\n--no-skills\n--no-prompt-templates\n--no-themes\n--tools\n--no-tools\n--thinking"))
+    raise SystemExit(0)
+record = os.environ["AUTOREVIEW_FAKE_RECORD"]
+Path(record).write_text(json.dumps({"argv": args, "cwd": os.getcwd(), "stdin": sys.stdin.read()}))
+report = {
+    "findings": [],
+    "overall_correctness": "patch is correct",
+    "overall_explanation": "fake pi clean",
+    "overall_confidence": 0.99,
+}
+print(json.dumps(report))
+'''
+
+
 def self_test_engine_isolation() -> int:
     with tempfile.TemporaryDirectory(prefix="autoreview-isolation-test.") as tempdir:
         root = Path(tempdir)
@@ -1043,13 +1164,17 @@ def self_test_engine_isolation() -> int:
         create_hostile_repo(repo)
         codex_bin = root / "codex"
         claude_bin = root / "claude"
+        pi_bin = root / "pi"
         record_path = root / "record.json"
+        pi_invocations_path = root / "pi-invocations.jsonl"
         write_executable(codex_bin, fake_codex_script())
         write_executable(claude_bin, fake_claude_script())
+        write_executable(pi_bin, fake_pi_script())
 
         args = argparse.Namespace(
             codex_bin=str(codex_bin),
             claude_bin=str(claude_bin),
+            pi_bin=str(pi_bin),
             tools=True,
             web_search=True,
             model=None,
@@ -1059,6 +1184,7 @@ def self_test_engine_isolation() -> int:
         )
 
         os.environ["AUTOREVIEW_FAKE_RECORD"] = str(record_path)
+        os.environ["AUTOREVIEW_FAKE_PI_INVOCATIONS"] = str(pi_invocations_path)
         try:
             run_codex(args, repo, "review hostile patch")
             codex_record = json.loads(record_path.read_text())
@@ -1087,6 +1213,27 @@ def self_test_engine_isolation() -> int:
             if Path(claude_record["cwd"]).resolve() != repo.resolve():
                 raise SystemExit("claude isolation self-test failed: wrong cwd")
 
+            run_pi(args, repo, f"review hostile patch\nRepository: {repo}")
+            pi_record = json.loads(record_path.read_text())
+            pi_argv = pi_record["argv"]
+            for required in ["--print", *pi_review_isolation_flags(), "--tools", "read,grep,find,ls"]:
+                if required not in pi_argv:
+                    raise SystemExit(f"pi isolation self-test failed: missing {required}")
+            if Path(pi_record["cwd"]).resolve() == repo.resolve():
+                raise SystemExit("pi isolation self-test failed: review ran inside hostile repo")
+            if str(repo) not in pi_record["stdin"]:
+                raise SystemExit("pi isolation self-test failed: prompt omitted reviewed repo path")
+            pi_invocations = [
+                json.loads(line)
+                for line in pi_invocations_path.read_text().splitlines()
+                if line.strip()
+            ]
+            if [entry["argv"] for entry in pi_invocations[:3]] != [["--version"], ["--help"], pi_argv]:
+                raise SystemExit("pi isolation self-test failed: unexpected probe/run order")
+            for entry in pi_invocations[:2]:
+                if Path(entry["cwd"]).resolve() == repo.resolve():
+                    raise SystemExit("pi isolation self-test failed: probe ran inside hostile repo")
+
             os.environ["AUTOREVIEW_FAKE_CLAUDE_VERSION"] = "2.1.168 (Claude Code)"
             try:
                 ensure_claude_isolation_supported(args, repo)
@@ -1104,14 +1251,38 @@ def self_test_engine_isolation() -> int:
                     raise
             else:
                 raise SystemExit("claude unparseable version self-test failed")
+
+            os.environ["AUTOREVIEW_FAKE_PI_VERSION"] = "0.78.1"
+            try:
+                ensure_pi_isolation_supported(args, repo)
+            except SystemExit as exc:
+                if ">= 0.79.0" not in str(exc):
+                    raise
+            else:
+                raise SystemExit("pi version floor self-test failed")
+
+            os.environ["AUTOREVIEW_FAKE_PI_VERSION"] = "0.79.0"
+            os.environ["AUTOREVIEW_FAKE_PI_HELP"] = "--print\n--no-session\n--no-context-files\n--no-extensions\n--no-skills\n--no-prompt-templates\n--no-themes\n--tools\n--no-tools\n--thinking"
+            try:
+                ensure_pi_isolation_supported(args, repo)
+            except SystemExit as exc:
+                if "--no-approve" not in str(exc):
+                    raise
+            else:
+                raise SystemExit("pi missing --no-approve self-test failed")
         finally:
             os.environ.pop("AUTOREVIEW_FAKE_RECORD", None)
             os.environ.pop("AUTOREVIEW_FAKE_CLAUDE_VERSION", None)
+            os.environ.pop("AUTOREVIEW_FAKE_PI_VERSION", None)
+            os.environ.pop("AUTOREVIEW_FAKE_PI_HELP", None)
+            os.environ.pop("AUTOREVIEW_FAKE_PI_INVOCATIONS", None)
 
     if parse_cli_version("2.1.169 (Claude Code)") != CLAUDE_SAFE_MODE_MIN_VERSION:
         raise SystemExit("claude version parsing self-test failed")
     if parse_cli_version("Claude Code 2.1.170") != (2, 1, 170):
         raise SystemExit("claude version parsing prefix self-test failed")
+    if parse_cli_version("pi 0.79.0") != PI_TRUST_ISOLATION_MIN_VERSION:
+        raise SystemExit("pi version parsing self-test failed")
     if "none" not in THINKING_LEVELS_BY_ENGINE["codex"]:
         raise SystemExit("codex thinking self-test failed")
     print("autoreview engine isolation self-test: ok")
@@ -1305,10 +1476,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base")
     parser.add_argument("--commit", default="HEAD")
     parser.add_argument("--engine", choices=ENGINES, default=os.environ.get("AUTOREVIEW_ENGINE", "codex"))
-    parser.add_argument("--reviewers", help="Comma-separated review panel, e.g. codex,claude or codex:gpt-5:high.")
+    parser.add_argument("--reviewers", help="Comma-separated review panel, e.g. codex,claude,pi or codex:gpt-5:high.")
     parser.add_argument("--panel", action="store_true", help="Run a Codex/Claude review panel unless --engine changes the first reviewer.")
     parser.add_argument("--model", action="append", help="Model for all reviewers or engine=model. Repeatable.")
-    parser.add_argument("--thinking", action="append", help="Thinking/effort for all reviewers or engine=level. Repeatable. Codex: none, minimal, low, medium, high, xhigh. Claude: low, medium, high, xhigh, max. Droid: off, none, low, medium, high.")
+    parser.add_argument("--thinking", action="append", help="Thinking/effort for all reviewers or engine=level. Repeatable. Codex: none, minimal, low, medium, high, xhigh. Claude: low, medium, high, xhigh, max. Droid: off, none, low, medium, high. Pi: off, minimal, low, medium, high, xhigh.")
     parser.add_argument(
         "--fallback-model",
         action="append",
@@ -1319,6 +1490,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--claude-bin", default=os.environ.get("CLAUDE_BIN", "claude"))
     parser.add_argument("--droid-bin", default=os.environ.get("DROID_BIN", "droid"))
     parser.add_argument("--copilot-bin", default=os.environ.get("COPILOT_BIN", "copilot"))
+    parser.add_argument("--pi-bin", default=os.environ.get("PI_BIN", "pi"))
     parser.add_argument("--no-tools", dest="tools", action="store_false", default=True, help="Disable tools for engines that support it. Codex and copilot reject no-tools review.")
     parser.add_argument("--no-web-search", dest="web_search", action="store_false", default=True)
     parser.add_argument(
@@ -1368,6 +1540,8 @@ def run_engine(args: argparse.Namespace, repo: Path, prompt: str) -> str:
         return run_droid(args, repo, prompt)
     if args.engine == "copilot":
         return run_copilot(args, repo, prompt)
+    if args.engine == "pi":
+        return run_pi(args, repo, prompt)
     raise SystemExit(f"unsupported engine: {args.engine}")
 
 
