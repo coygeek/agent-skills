@@ -650,6 +650,9 @@ def split_git_spec(spec: str) -> tuple[str, str | None]:
 def looks_like_git_reference(value: str) -> bool:
     if value.startswith(("git@", "ssh://", "https://", "http://", "file://")):
         return True
+    repo_part = value.split("#", 1)[0]
+    if "/" in repo_part and any(part in {".", ".."} for part in repo_part.split("/")):
+        return False
     if re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:#.+)?$", value):
         return True
     return False
@@ -813,7 +816,7 @@ def collect_reference_specs(args: argparse.Namespace) -> tuple[list[str], list[s
         args.references_file = parse_reference_env_list(os.environ.get("AUTOREVIEW_REFERENCES_FILE"))
     if not has_cli_reference_source and not reference_descriptions and os.environ.get("AUTOREVIEW_REFERENCE_DESCRIPTION"):
         reference_descriptions = parse_reference_env_list(os.environ.get("AUTOREVIEW_REFERENCE_DESCRIPTION"))
-    if not strict:
+    if not strict and not has_cli_reference_source:
         strict = parse_bool_env(os.environ.get("AUTOREVIEW_STRICT_REFERENCES"), "AUTOREVIEW_STRICT_REFERENCES")
     return references, reference_paths, reference_repos, reference_descriptions, hidden, strict
 
@@ -823,7 +826,16 @@ def build_references(args: argparse.Namespace, repo: Path) -> tuple[list[ReviewR
     references: list[ReviewReference] = []
     for raw in raw_references:
         alias, value = parse_alias_value(raw, "--reference")
-        if looks_like_git_reference(value):
+        local_candidate = Path(value).expanduser()
+        if local_candidate.exists():
+            references.append(
+                ReviewReference(
+                    alias=alias,
+                    kind="local_path",
+                    path=validate_local_reference_path(Path(value), repo),
+                )
+            )
+        elif looks_like_git_reference(value):
             repository, ref = split_git_spec(value)
             references.append(ReviewReference(alias=alias, kind="git", repository=repository, ref=ref))
         else:
@@ -2282,9 +2294,31 @@ def self_test_references() -> None:
         try:
             if [reference.alias for reference in cli_only_refs] != ["onlycli"]:
                 raise SystemExit("reference self-test failed: CLI reference source should suppress env reference sources")
+            if _cli_only_strict is not False:
+                raise SystemExit("reference self-test failed: CLI reference source should suppress env strict default")
         finally:
             if cli_only_workspace:
                 shutil.rmtree(cli_only_workspace, ignore_errors=True)
+        relative_parent = root / "relative-parent"
+        relative_parent.mkdir()
+        (relative_parent / "guide.md").write_text("relative parent reference\n")
+        original_cwd = Path.cwd()
+        os.chdir(repo)
+        try:
+            relative_refs, _relative_strict, relative_workspace = build_references(
+                reference_test_args(reference=["reldocs=../relative-parent"]),
+                repo,
+            )
+        finally:
+            os.chdir(original_cwd)
+        try:
+            if len(relative_refs) != 1 or relative_refs[0].kind != "local_path":
+                raise SystemExit("reference self-test failed: relative parent path should be local")
+            if relative_refs[0].path != relative_parent.resolve():
+                raise SystemExit("reference self-test failed: relative parent path not canonical")
+        finally:
+            if relative_workspace:
+                shutil.rmtree(relative_workspace, ignore_errors=True)
 
         cli_args = reference_test_args(
             reference=[f"clidocs={local_ref}"],
