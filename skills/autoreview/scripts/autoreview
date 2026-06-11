@@ -941,6 +941,30 @@ def build_references(args: argparse.Namespace, repo: Path) -> tuple[list[ReviewR
     return references, strict, workspace
 
 
+def clone_git_reference(source: str, dest: Path, ref: str | None, repo: Path) -> subprocess.CompletedProcess[str]:
+    git = resolve_command("git", repo)
+    cmd = [git, "clone", "--quiet", "--depth", "1"]
+    if ref:
+        cmd.extend(["--branch", ref])
+    cmd.extend([source, str(dest)])
+    result = run(cmd, repo, check=False)
+    if result.returncode == 0 or not ref:
+        return result
+
+    shutil.rmtree(dest, ignore_errors=True)
+    clone_result = run([git, "clone", "--quiet", "--filter=blob:none", "--no-checkout", source, str(dest)], repo, check=False)
+    if clone_result.returncode != 0:
+        return clone_result
+    fetch_result = run([git, "-C", str(dest), "fetch", "--quiet", "--depth", "1", "origin", ref], repo, check=False)
+    if fetch_result.returncode != 0:
+        shutil.rmtree(dest, ignore_errors=True)
+        return fetch_result
+    checkout_result = run([git, "-C", str(dest), "checkout", "--quiet", "FETCH_HEAD"], repo, check=False)
+    if checkout_result.returncode != 0:
+        shutil.rmtree(dest, ignore_errors=True)
+    return checkout_result
+
+
 def materialize_git_references(references: list[ReviewReference], repo: Path, strict: bool) -> Path | None:
     git_refs = [reference for reference in references if reference.kind == "git"]
     if not git_refs:
@@ -950,11 +974,7 @@ def materialize_git_references(references: list[ReviewReference], repo: Path, st
         assert reference.repository
         dest = workspace / reference.alias
         source = github_repo_to_url(reference.repository)
-        cmd = [resolve_command("git", repo), "clone", "--quiet", "--depth", "1"]
-        if reference.ref:
-            cmd.extend(["--branch", reference.ref])
-        cmd.extend([source, str(dest)])
-        result = run(cmd, repo, check=False)
+        result = clone_git_reference(source, dest, reference.ref, repo)
         if result.returncode != 0:
             if strict:
                 shutil.rmtree(workspace, ignore_errors=True)
@@ -2335,6 +2355,7 @@ def self_test_references() -> None:
         (local_ref / "guide.md").write_text("guide\n")
         git_ref = root / "reference-repo"
         create_reference_source_repo(git_ref)
+        git_ref_sha = run([resolve_command("git", git_ref), "rev-parse", "HEAD"], git_ref).stdout.strip()
         file_ref = root / "file-reference.md"
         file_ref.write_text("notes\n")
         references_file = root / "references.jsonc"
@@ -2422,6 +2443,22 @@ def self_test_references() -> None:
         if reference_mode_for_engine(dry_claude_args, repo) != "native_add_dir":
             raise SystemExit("reference self-test failed: dry-run git references should plan native claude mode")
         enforce_reference_mode(dry_claude_args, repo)
+        pinned_refs, _pinned_strict, pinned_workspace = build_references(
+            reference_test_args(reference_repo=[f"pinned={git_ref}#{git_ref_sha}"], strict_references=True),
+            repo,
+        )
+        try:
+            if len(pinned_refs) != 1 or pinned_refs[0].runtime_path is None:
+                raise SystemExit("reference self-test failed: pinned commit reference was not materialized")
+            pinned_head = run(
+                [resolve_command("git", pinned_refs[0].runtime_path), "rev-parse", "HEAD"],
+                pinned_refs[0].runtime_path,
+            ).stdout.strip()
+            if pinned_head != git_ref_sha:
+                raise SystemExit("reference self-test failed: pinned commit checkout did not match requested ref")
+        finally:
+            if pinned_workspace:
+                shutil.rmtree(pinned_workspace, ignore_errors=True)
 
         cli_args = reference_test_args(
             reference=[f"clidocs={local_ref}"],
