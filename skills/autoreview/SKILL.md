@@ -160,31 +160,38 @@ For models with slashes or extra colons, prefer keyed form:
 
 ```bash
 "$AUTOREVIEW" --engine droid --model claude-opus-4-8
-"$AUTOREVIEW" --reviewers codex,droid --model codex=gpt-5.4 --model droid=claude-opus-4-8
+"$AUTOREVIEW" --reviewers codex,droid --model codex=gpt-5.1 --model droid=claude-opus-4-8
 ```
 
 ## Models and thinking
 
 The helper accepts `--model` globally or per engine (`engine=model`) and `--thinking` globally or per engine (`engine=level`). Repeat either flag for multiple reviewers.
 
-On current `main`, Droid supports `--model` only; `--thinking` is rejected until [PR #16](https://github.com/openclaw/agent-skills/pull/16) lands.
+On current `main`, Droid supports `--model` only; `--thinking` is rejected until Droid reasoning support lands.
 
 | Engine | Model flag | Example model IDs | Thinking flag | Accepted levels |
 |--------|------------|-------------------|---------------|-----------------|
-| **codex** (default) | `codex --model X exec ...` | `gpt-5.4`, `o3` | `-c model_reasoning_effort=Y` | `low`, `medium`, `high`, `xhigh` |
-| **claude** | `claude --model X` | `sonnet`, `opus`, `fable`, `haiku`, full IDs | `--effort Y` | `low`, `medium`, `high`, `xhigh`, `max` |
-| **droid** | `droid exec --model X` | `claude-opus-4-8`, Factory model IDs | not supported on `main` | — |
-| **copilot** | `copilot --model X` | `gpt-5.2`, Copilot aliases | not supported | — |
+| **codex** (default) | `codex --model X exec ...` | `gpt-5.1`, `o3` | `-c model_reasoning_effort=Y` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh` |
+| **claude** | `claude --model X` | `sonnet`, `opus`, `haiku`, full Anthropic IDs | `--effort Y` | `low`, `medium`, `high`, `xhigh`, `max` |
+| **droid** | `droid exec --model X` | `claude-opus-4-8`, Factory model IDs | not supported on `main` | n/a |
+| **copilot** | `copilot --model X` | `gpt-5.2`, Copilot model aliases | not supported | n/a |
 
 Claude also supports `--fallback-model a,b` for availability-based fallback chains ([model-config](https://code.claude.com/docs/en/model-config)). Current Claude docs note that auth, billing, rate-limit, request-size, and transport errors do not trigger fallback, and the changelog documents interactive-session support in `v2.1.166`.
 
-Examples:
+Examples matching current `main` behavior:
 
 ```bash
-"$AUTOREVIEW" --engine codex --model gpt-5.4 --thinking high
+# Codex with explicit model and reasoning
+"$AUTOREVIEW" --engine codex --model gpt-5.1 --thinking high
+
+# Claude Code aliases or full model names, with optional availability fallback
 "$AUTOREVIEW" --engine claude --model sonnet --thinking max
 "$AUTOREVIEW" --engine claude --model opus --fallback-model sonnet,haiku
+
+# Factory Droid (model only)
 "$AUTOREVIEW" --engine droid --model claude-opus-4-8
+
+# GitHub Copilot (model only; no thinking knob)
 "$AUTOREVIEW" --engine copilot --model gpt-5.2
 ```
 
@@ -197,12 +204,22 @@ CLI flags take precedence over environment variables.
 | `AUTOREVIEW_MODEL` | Default `--model` for all engines |
 | `AUTOREVIEW_THINKING` | Default `--thinking` for all engines |
 | `AUTOREVIEW_FALLBACK_MODEL` | Default Claude `--fallback-model` chain |
-| `AUTOREVIEW_CODEX_MODEL` | Default Codex model |
-| `AUTOREVIEW_CLAUDE_MODEL` | Default Claude model |
+| `AUTOREVIEW_<ENGINE>_MODEL` | Per-engine model override |
 | `AUTOREVIEW_<ENGINE>_THINKING` | Per-engine thinking override |
 | `AUTOREVIEW_CLAUDE_FALLBACK_MODEL` | Claude-only fallback chain |
 
-Codex maps thinking to `model_reasoning_effort`. Claude maps thinking to `--effort`. Copilot rejects `--thinking`. Droid rejects `--thinking` on current `main`.
+Codex maps thinking to `model_reasoning_effort`. Claude maps thinking to `--effort`. Droid and Copilot reject `--thinking`. Only Claude accepts `--fallback-model`; non-Claude engine-specific fallback overrides are rejected.
+
+## Review engine isolation
+
+When autoreview runs inside the repository under review, external reviewer CLIs must not load project-local trust or configuration that the branch controls.
+
+| Engine | Isolation flags | Reference |
+|--------|-----------------|-----------|
+| **codex** | `-c project_doc_max_bytes=0`, repo `trust_level="untrusted"`, `exec --ignore-user-config --ignore-rules`, plus read-only sandbox | Codex CLI `exec --help` |
+| **claude** | `--safe-mode --setting-sources user --strict-mcp-config --disallowedTools mcp__*` plus explicit `--allowedTools` (`--safe-mode` requires Claude Code `v2.1.169+`) | Claude Code [CLI reference](https://code.claude.com/docs/en/cli-reference) |
+
+Codex `--ignore-user-config` skips config loading for the exec run while keeping `CODEX_HOME` auth usable. The explicit repo trust override and zero project-doc budget keep reviewed-repo `AGENTS.md` and `.codex/` trust surfaces out of the review prompt. `--ignore-rules` skips user/project execpolicy rules. Claude `--safe-mode` disables project hooks, skills, plugins, MCP servers, and CLAUDE.md while preserving normal authentication, model selection, built-in tools, and permissions; managed settings policy can still apply. `--setting-sources user` avoids project/local settings from the reviewed checkout, and current Claude Code docs note the project-skill blocking behavior was fixed in `v2.1.69`. `--strict-mcp-config` and `--disallowedTools mcp__*` keep MCP unavailable to the review run. `--bare` is not used here because Claude's headless docs say it skips OAuth and keychain reads.
 
 ## Context Efficiency
 
@@ -249,7 +266,8 @@ The helper:
 - supports `--stream-engine-output` or `AUTOREVIEW_STREAM_ENGINE_OUTPUT=1` for live engine text while preserving structured validation; Codex and Claude hide tool/file event details, emit compact activity summaries, and report usage at turn completion
 - supports opt-in review panels with `--panel` / `--reviewers`, plus per-engine `--model`, `--thinking`, and Claude `--fallback-model`
 - honors `AUTOREVIEW_MODEL`, `AUTOREVIEW_THINKING`, `AUTOREVIEW_FALLBACK_MODEL`, and per-engine `AUTOREVIEW_<ENGINE>_MODEL` / `AUTOREVIEW_<ENGINE>_THINKING` environment defaults when CLI flags are omitted
-- allows read-only tools and web search by default where the selected CLI supports them; forbids nested review in the prompt; Codex is run through `codex exec` with read-only sandbox and structured output
+- allows read-only tools and web search by default where the selected CLI supports them; forbids nested review in the prompt; Codex is run through `codex exec` with read-only sandbox, reviewed-repo instruction/config/rule isolation flags, and structured output
+- runs Claude with `--safe-mode` (`v2.1.169+`), `--setting-sources user`, MCP disabled, explicit allowed tools, and `--fallback-model` when set, so reviewed-repo hooks/skills/MCP do not affect the review run while normal auth still works; managed settings policy can still apply
 - prints `review still running: <engine> elapsed=<seconds>s pid=<pid>` to stderr at long-running intervals while waiting for the selected review engine, unless streamed output or compact Codex activity has been visible recently
 - prints `autoreview clean: no accepted/actionable findings reported` when the selected review command exits 0
 - exits nonzero when accepted/actionable findings are present
