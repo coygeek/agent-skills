@@ -98,6 +98,93 @@ Optional review context is first-class:
 "$AUTOREVIEW" --mode branch --base origin/main --prompt-file /tmp/review-notes.md --dataset /tmp/evidence.json
 ```
 
+## Review References
+
+Use references when the reviewer needs read-only context outside the reviewed diff, such as companion docs, a sibling repo, or a pinned public repo. References are not reviewed patch content. Findings that rely on a reference must still point to changed code and should cite the reference alias/path evidence.
+
+Examples:
+
+```bash
+# Local docs outside the reviewed checkout:
+"$AUTOREVIEW" --mode branch --base origin/main --reference docs=../product-docs --reference-description docs="Product invariants"
+
+# Sibling repo plus a hidden local notes directory:
+"$AUTOREVIEW" --mode branch --base origin/main \
+  --reference-path sdk=../example-sdk \
+  --reference hidden-notes=/tmp/autoreview-private-notes \
+  --reference-hidden hidden-notes
+
+# Git reference, optionally pinned:
+"$AUTOREVIEW" --mode branch --base origin/main --reference-repo patterns=openclaw/agent-skills#main
+
+# JSON/JSONC reference manifest:
+"$AUTOREVIEW" --mode branch --base origin/main --references-file /tmp/autoreview-references.jsonc
+```
+
+Reference manifest shape:
+
+```json
+{
+  "references": [
+    {
+      "alias": "docs",
+      "path": "../product-docs",
+      "description": "Product invariants",
+      "hidden": false
+    },
+    {
+      "alias": "patterns",
+      "repo": "openclaw/agent-skills#main"
+    }
+  ]
+}
+```
+
+Supported reference flags:
+
+- `--reference ALIAS=PATH_OR_REPO` accepts local paths or Git specs such as `owner/repo#ref`.
+- `--reference-path ALIAS=PATH` is local-only and accepts directories or files.
+- `--reference-repo ALIAS=OWNER/REPO[#REF]` or `ALIAS=GIT_URL[#REF]` materializes a read-only Git reference in a temp directory.
+- `--reference-description ALIAS=TEXT` adds reviewer-facing context.
+- `--reference-hidden ALIAS` marks sensitive aliases as hidden from public summaries; it does not make unsafe data safe to pass.
+- `--references-file PATH` loads a JSON/JSONC array or `{ "references": [...] }`.
+- `--strict-references` fails when an engine cannot provide native directory access for every reference.
+
+Aliases must be non-empty and use only letters, numbers, `.`, `_`, or `-`. Slashes, whitespace, commas, and backticks are rejected. Local references must exist, stay outside the reviewed repo, and must not point at broad/private locations such as `$HOME`, `.env*`, `.ssh`, `.config`, `.codex`, or `.claude`.
+
+Engine reference modes:
+
+| Engine | Mode | Behavior |
+|--------|------|----------|
+| **opencode** | `native_config` | Injects OpenCode `references` config through `OPENCODE_CONFIG_CONTENT`; generated config stays outside the reviewed repo |
+| **claude** | `native_add_dir` | Adds each reference directory with `--add-dir` plus the prompt manifest |
+| **codex** | `native_add_dir` or `prompt_manifest` | Uses `codex exec --add-dir` when the installed Codex CLI advertises it; otherwise degrades to prompt manifest |
+| **pi** | `prompt_manifest` | Passes alias/location guidance in the prompt only |
+| **droid** | `prompt_manifest` | Passes alias/location guidance in the prompt file only |
+| **copilot** | `prompt_manifest` | Passes alias/location guidance in the prompt only |
+
+`--strict-references` is appropriate when native file access is required. It passes for OpenCode, Claude, and Codex with `exec --add-dir` support when all references have materialized directories. It fails for prompt-only modes, including Pi, Droid, Copilot, and Codex installations without `--add-dir`.
+
+Environment defaults are used only when no CLI reference source is present:
+
+| Variable | Purpose |
+|----------|---------|
+| `AUTOREVIEW_REFERENCE` | Newline list or JSON array of `ALIAS=PATH_OR_REPO` reference specs |
+| `AUTOREVIEW_REFERENCES_FILE` | Newline list or JSON array of reference manifest files |
+| `AUTOREVIEW_REFERENCE_DESCRIPTION` | Newline list or JSON array of `ALIAS=TEXT` descriptions |
+| `AUTOREVIEW_STRICT_REFERENCES` | Boolean strict-reference default (`1`, `true`, `yes`, `on`, or false equivalents) |
+
+`--dataset` is different from references: datasets are extra evidence files embedded in the review bundle and directories are rejected. References are contextual locations/repos that may be exposed through native engine access or a prompt manifest.
+
+Safety notes:
+
+- Treat references as read-only context. Do not pass secrets, credentials, private account IDs, private URLs, or broad home/config directories.
+- Hidden references are still visible to the selected review engine; they only signal that aliases should not be repeated in public summaries unless necessary.
+- Do not use references to expand review scope. The reviewed diff remains the only patch under review.
+- Git references are cloned/materialized under temp directories and removed after the helper exits.
+
+Dry-run output prints `references_metadata` and `reference_modes_by_engine` when references are present. Mode names are `native_config`, `native_add_dir`, and `prompt_manifest`.
+
 If an open PR exists, use its actual base:
 
 ```bash
@@ -258,6 +345,7 @@ The smoke harness has thin shell wrappers over a shared Python implementation:
 
 ```bash
 "$AUTOREVIEW_HARNESS" --fixture benign --engine codex
+"$AUTOREVIEW_HARNESS" --reference-fixtures
 ```
 
 On native Windows, invoke the extensionless Python helper through Python:
@@ -270,6 +358,7 @@ and the smoke harness:
 
 ```powershell
 skills\autoreview\scripts\test-review-harness.ps1 -Fixture benign -Engine codex
+skills\autoreview\scripts\test-review-harness.ps1 -ReferenceFixtures
 ```
 
 The helper:
@@ -283,15 +372,17 @@ The helper:
 - use `--mode commit --commit <ref>` for already-committed work, especially clean `main` after landing
 - should be left in `--mode auto` or forced to `--mode branch` for PR/branch work; do not force `--mode local` after committing
 - writes only to stdout unless `--output`, `--json-output`, or live streamed engine stderr is set
-- supports `--dry-run`, `--parallel-tests`, `--parallel-tests-shell`, `--prompt`, `--prompt-file`, `--dataset`, `--no-tools`, `--no-web-search`, and commit refs
+- supports `--dry-run`, `--parallel-tests`, `--parallel-tests-shell`, `--prompt`, `--prompt-file`, `--dataset`, review references, `--no-tools`, `--no-web-search`, and commit refs
 - supports `--stream-engine-output` or `AUTOREVIEW_STREAM_ENGINE_OUTPUT=1` for live engine text while preserving structured validation; Codex and Claude hide tool/file event details, emit compact activity summaries, and report usage at turn completion
 - supports opt-in review panels with `--panel` / `--reviewers`, plus per-engine `--model`, `--thinking`, and Claude `--fallback-model`
 - uses built-in model defaults `codex=gpt-5.5` and `claude=claude-fable-5`; honors `AUTOREVIEW_MODEL`, `AUTOREVIEW_THINKING`, `AUTOREVIEW_FALLBACK_MODEL`, and per-engine `AUTOREVIEW_<ENGINE>_MODEL` / `AUTOREVIEW_<ENGINE>_THINKING` environment overrides when CLI flags are omitted
+- honors `AUTOREVIEW_REFERENCE`, `AUTOREVIEW_REFERENCES_FILE`, `AUTOREVIEW_REFERENCE_DESCRIPTION`, and `AUTOREVIEW_STRICT_REFERENCES` only when CLI reference sources are omitted
 - allows read-only tools and web search by default where the selected CLI supports them; forbids nested review in the prompt; Codex is run through `codex exec` with read-only sandbox, reviewed-repo instruction/config/rule isolation flags, and structured output
 - runs Claude with `--safe-mode` (`v2.1.169+`), `--setting-sources user`, MCP disabled, explicit allowed tools, and `--fallback-model` when set, so reviewed-repo hooks/skills/MCP do not affect the review run while normal auth still works; managed settings policy can still apply
 - runs Droid with `droid exec` in read-only mode, forwards `--model` and `-r, --reasoning-effort`, and switches `--output-format` to `stream-json` when streaming is enabled
 - runs Pi `v0.79.0+` from neutral temporary directories with `--no-approve`, `--no-session`, disabled Pi context/resource loading, and built-in read-only tools (`read,grep,find,ls`) when tools are enabled
 - runs OpenCode with `opencode run --dir <repo> --pure --format json` from a neutral temporary directory, forwards `--model` and `--variant`, injects deny-by-default permissions, disables project config loading, and passes the review prompt over stdin
+- exposes deterministic reference coverage through `"$AUTOREVIEW" --self-test-references` and `"$AUTOREVIEW_HARNESS" --reference-fixtures`
 - prints `review still running: <engine> elapsed=<seconds>s pid=<pid>` to stderr at long-running intervals while waiting for the selected review engine, unless streamed output or compact Codex activity has been visible recently
 - prints `autoreview clean: no accepted/actionable findings reported` when the selected review command exits 0
 - exits nonzero when accepted/actionable findings are present
