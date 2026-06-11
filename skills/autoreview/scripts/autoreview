@@ -1600,6 +1600,13 @@ def self_test_config_defaults() -> None:
             raise SystemExit(f"self-test config defaults failed: model={codex.model!r}")
         if codex.thinking != "high":
             raise SystemExit(f"self-test config defaults failed: thinking={codex.thinking!r}")
+        os.environ.pop("AUTOREVIEW_CODEX_MODEL")
+        os.environ.pop("AUTOREVIEW_CODEX_THINKING")
+        global_only = reviewer_args(reviewer_test_args(engine="codex"))[0]
+        if global_only.model != "env-global-model":
+            raise SystemExit(f"self-test config defaults failed: global model={global_only.model!r}")
+        if global_only.thinking != "low":
+            raise SystemExit(f"self-test config defaults failed: global thinking={global_only.thinking!r}")
         cli = reviewer_args(reviewer_test_args(engine="codex", model=["cli-model"], thinking=["medium"]))[0]
         if cli.model != "cli-model" or cli.thinking != "medium":
             raise SystemExit("self-test config defaults failed: CLI values should override env")
@@ -1632,6 +1639,10 @@ def self_test_fallback_scope() -> None:
             raise SystemExit("self-test fallback scope failed: codex should ignore AUTOREVIEW_FALLBACK_MODEL")
         if claude.fallback_model != "env-claude-fallback":
             raise SystemExit(f"self-test fallback scope failed: claude fallback={claude.fallback_model!r}")
+        os.environ.pop("AUTOREVIEW_CLAUDE_FALLBACK_MODEL")
+        global_only = reviewer_args(reviewer_test_args(engine="claude"))[0]
+        if global_only.fallback_model != "env-global-fallback":
+            raise SystemExit(f"self-test fallback scope failed: global fallback={global_only.fallback_model!r}")
         cli_global = reviewer_args(reviewer_test_args(engine="claude", fallback_model=["cli-global"]))[0]
         if cli_global.fallback_model != "cli-global":
             raise SystemExit("self-test fallback scope failed: CLI global fallback should override env")
