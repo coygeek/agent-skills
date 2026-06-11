@@ -1358,8 +1358,8 @@ def run_engine(args: argparse.Namespace, repo: Path, prompt: str) -> str:
     raise SystemExit(f"unsupported engine: {args.engine}")
 
 
-def env_defaults_for(option: str) -> tuple[str | None, dict[str, str]]:
-    env_key = option.upper()
+def env_defaults_for(env_suffix: str) -> tuple[str | None, dict[str, str]]:
+    env_key = env_suffix.upper()
     global_value = os.environ.get(f"AUTOREVIEW_{env_key}")
     if global_value is not None:
         global_value = global_value.strip() or None
@@ -1640,6 +1640,14 @@ def self_test_fallback_scope() -> None:
         )[0]
         if cli_engine.fallback_model != "cli-claude":
             raise SystemExit("self-test fallback scope failed: CLI engine fallback should override CLI global")
+        inline = reviewer_args(
+            reviewer_test_args(
+                reviewers="claude:inline-model:high",
+                fallback_model=["cli-global"],
+            )
+        )[0]
+        if inline.fallback_model != "cli-global":
+            raise SystemExit("self-test fallback scope failed: CLI global fallback should apply to inline reviewers")
         explicit = reviewer_test_args(reviewers="codex", fallback_model=["codex=foo"])
         try:
             reviewer_args(explicit)
