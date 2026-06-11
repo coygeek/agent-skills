@@ -1442,7 +1442,7 @@ def reviewer_args(args: argparse.Namespace) -> list[argparse.Namespace]:
     if selected_non_claude_fallback:
         engine_list = ", ".join(selected_non_claude_fallback)
         raise SystemExit(f"--fallback-model is only supported for claude, not {engine_list}")
-    if global_fallback and "claude" not in selected_engines:
+    if (global_fallback or env_global_fallback) and "claude" not in selected_engines:
         raise SystemExit("--fallback-model is only supported for claude; no claude reviewer selected")
 
     seen: set[str] = set()
@@ -1656,6 +1656,12 @@ def self_test_fallback_scope() -> None:
         global_only = reviewer_args(reviewer_test_args(engine="claude"))[0]
         if global_only.fallback_model != "env-global-fallback":
             raise SystemExit(f"self-test fallback scope failed: global fallback={global_only.fallback_model!r}")
+        try:
+            reviewer_args(reviewer_test_args(engine="codex"))
+            raise SystemExit("self-test fallback scope failed: env global fallback without Claude should be rejected")
+        except SystemExit as exc:
+            if "no claude reviewer selected" not in str(exc):
+                raise
         cli_global = reviewer_args(reviewer_test_args(engine="claude", fallback_model=["cli-global"]))[0]
         if cli_global.fallback_model != "cli-global":
             raise SystemExit("self-test fallback scope failed: CLI global fallback should override env")
