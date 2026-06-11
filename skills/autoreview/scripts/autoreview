@@ -141,8 +141,24 @@ def native_reference_directories(references: list["ReviewReference"]) -> list[Pa
     return paths
 
 
-def all_references_have_directory(references: list["ReviewReference"]) -> bool:
-    return len(native_reference_directories(references)) == len(references)
+def reference_has_native_directory(reference: "ReviewReference", *, assume_unmaterialized_git: bool = False) -> bool:
+    if reference_runtime_directory(reference) is not None:
+        return True
+    return assume_unmaterialized_git and reference.kind == "git" and reference.runtime_path is None
+
+
+def all_references_have_directory(
+    references: list["ReviewReference"],
+    *,
+    assume_unmaterialized_git: bool = False,
+) -> bool:
+    return all(
+        reference_has_native_directory(
+            reference,
+            assume_unmaterialized_git=assume_unmaterialized_git,
+        )
+        for reference in references
+    )
 
 
 def opencode_reference_config(references: list["ReviewReference"]) -> dict[str, Any]:
@@ -743,7 +759,7 @@ def apply_reference_description(reference: ReviewReference, raw: str) -> None:
 
 def risky_reference_path(path: Path, home: Path | None) -> str | None:
     name = path.name
-    if name == ".env" or name.startswith(".env."):
+    if name.startswith(".env"):
         return "environment files are not allowed as references"
     broad_roots: list[tuple[Path, str]] = []
     if path.anchor:
@@ -989,11 +1005,25 @@ def reference_mode_for_engine(args: argparse.Namespace, repo: Path) -> str:
     if not references:
         return "none"
     engine = args.engine
-    if engine == "opencode" and all_references_have_directory(references):
+    assume_git_dirs = bool(getattr(args, "dry_run", False))
+    if engine == "opencode" and all_references_have_directory(
+        references,
+        assume_unmaterialized_git=assume_git_dirs,
+    ):
         return "native_config"
-    if engine == "claude" and all_references_have_directory(references):
+    if engine == "claude" and all_references_have_directory(
+        references,
+        assume_unmaterialized_git=assume_git_dirs,
+    ):
         return "native_add_dir"
-    if engine == "codex" and all_references_have_directory(references) and codex_exec_supports_add_dir(args, repo):
+    if (
+        engine == "codex"
+        and all_references_have_directory(
+            references,
+            assume_unmaterialized_git=assume_git_dirs,
+        )
+        and codex_exec_supports_add_dir(args, repo)
+    ):
         return "native_add_dir"
     return "prompt_manifest"
 
@@ -2373,6 +2403,25 @@ def self_test_references() -> None:
             raise SystemExit("reference self-test failed: dry-run materialized git workspace")
         if len(dry_refs) != 1 or dry_refs[0].kind != "git" or dry_refs[0].runtime_path is not None:
             raise SystemExit("reference self-test failed: dry-run git reference should remain unmaterialized")
+        dry_codex_args = argparse.Namespace(
+            engine="codex",
+            review_references=dry_refs,
+            effective_strict_references=True,
+            codex_add_dir_supported=True,
+            dry_run=True,
+        )
+        if reference_mode_for_engine(dry_codex_args, repo) != "native_add_dir":
+            raise SystemExit("reference self-test failed: dry-run git references should plan native codex mode")
+        enforce_reference_mode(dry_codex_args, repo)
+        dry_claude_args = argparse.Namespace(
+            engine="claude",
+            review_references=dry_refs,
+            effective_strict_references=True,
+            dry_run=True,
+        )
+        if reference_mode_for_engine(dry_claude_args, repo) != "native_add_dir":
+            raise SystemExit("reference self-test failed: dry-run git references should plan native claude mode")
+        enforce_reference_mode(dry_claude_args, repo)
 
         cli_args = reference_test_args(
             reference=[f"clidocs={local_ref}"],
@@ -2558,6 +2607,14 @@ def self_test_references() -> None:
         try:
             build_references(reference_test_args(reference=[f"envfile={env_file}"]), repo)
             raise SystemExit("reference self-test failed: .env file accepted")
+        except SystemExit as exc:
+            if "unsafe reference path" not in str(exc):
+                raise
+        envrc_file = root / ".envrc"
+        envrc_file.write_text("export SECRET=1\n")
+        try:
+            build_references(reference_test_args(reference=[f"envrc={envrc_file}"]), repo)
+            raise SystemExit("reference self-test failed: .envrc file accepted")
         except SystemExit as exc:
             if "unsafe reference path" not in str(exc):
                 raise
