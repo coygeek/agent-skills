@@ -557,7 +557,10 @@ def ensure_claude_isolation_supported(args: argparse.Namespace, repo: Path) -> N
 
 def ensure_pi_isolation_supported(args: argparse.Namespace, repo: Path) -> str:
     pi_bin = resolve_command(args.pi_bin, repo)
-    result = run([pi_bin, "--version"], repo, check=False)
+    with tempfile.TemporaryDirectory(prefix="autoreview-pi-probe.") as tempdir:
+        probe_cwd = Path(tempdir)
+        result = run([pi_bin, "--version"], probe_cwd, check=False)
+        help_result = run([pi_bin, "--help"], probe_cwd, check=False)
     if result.returncode != 0:
         raise SystemExit(f"pi engine requires Pi >= {format_version(PI_TRUST_ISOLATION_MIN_VERSION)}; --version failed")
     version = parse_cli_version(f"{result.stdout}\n{result.stderr}")
@@ -568,7 +571,6 @@ def ensure_pi_isolation_supported(args: argparse.Namespace, repo: Path) -> str:
             f"pi engine requires Pi >= {format_version(PI_TRUST_ISOLATION_MIN_VERSION)} "
             f"for reviewed-repo trust isolation (found {format_version(version)})"
         )
-    help_result = run([pi_bin, "--help"], repo, check=False)
     help_text = f"{help_result.stdout}\n{help_result.stderr}"
     required_flags = [
         "--print",
@@ -1128,6 +1130,10 @@ from pathlib import Path
 import sys
 
 args = sys.argv[1:]
+invocations = os.environ.get("AUTOREVIEW_FAKE_PI_INVOCATIONS")
+if invocations:
+    with open(invocations, "a", encoding="utf-8") as file:
+        file.write(json.dumps({"argv": args, "cwd": os.getcwd()}) + "\n")
 if "--version" in args or "-v" in args:
     print(os.environ.get("AUTOREVIEW_FAKE_PI_VERSION", "0.79.0"))
     raise SystemExit(0)
@@ -1156,6 +1162,7 @@ def self_test_engine_isolation() -> int:
         claude_bin = root / "claude"
         pi_bin = root / "pi"
         record_path = root / "record.json"
+        pi_invocations_path = root / "pi-invocations.jsonl"
         write_executable(codex_bin, fake_codex_script())
         write_executable(claude_bin, fake_claude_script())
         write_executable(pi_bin, fake_pi_script())
@@ -1173,6 +1180,7 @@ def self_test_engine_isolation() -> int:
         )
 
         os.environ["AUTOREVIEW_FAKE_RECORD"] = str(record_path)
+        os.environ["AUTOREVIEW_FAKE_PI_INVOCATIONS"] = str(pi_invocations_path)
         try:
             run_codex(args, repo, "review hostile patch")
             codex_record = json.loads(record_path.read_text())
@@ -1209,6 +1217,16 @@ def self_test_engine_isolation() -> int:
                     raise SystemExit(f"pi isolation self-test failed: missing {required}")
             if Path(pi_record["cwd"]).resolve() != repo.resolve():
                 raise SystemExit("pi isolation self-test failed: wrong cwd")
+            pi_invocations = [
+                json.loads(line)
+                for line in pi_invocations_path.read_text().splitlines()
+                if line.strip()
+            ]
+            if [entry["argv"] for entry in pi_invocations[:3]] != [["--version"], ["--help"], pi_argv]:
+                raise SystemExit("pi isolation self-test failed: unexpected probe/run order")
+            for entry in pi_invocations[:2]:
+                if Path(entry["cwd"]).resolve() == repo.resolve():
+                    raise SystemExit("pi isolation self-test failed: probe ran inside hostile repo")
 
             os.environ["AUTOREVIEW_FAKE_CLAUDE_VERSION"] = "2.1.168 (Claude Code)"
             try:
@@ -1251,6 +1269,7 @@ def self_test_engine_isolation() -> int:
             os.environ.pop("AUTOREVIEW_FAKE_CLAUDE_VERSION", None)
             os.environ.pop("AUTOREVIEW_FAKE_PI_VERSION", None)
             os.environ.pop("AUTOREVIEW_FAKE_PI_HELP", None)
+            os.environ.pop("AUTOREVIEW_FAKE_PI_INVOCATIONS", None)
 
     if parse_cli_version("2.1.169 (Claude Code)") != CLAUDE_SAFE_MODE_MIN_VERSION:
         raise SystemExit("claude version parsing self-test failed")
