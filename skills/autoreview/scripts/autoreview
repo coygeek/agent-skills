@@ -122,7 +122,41 @@ def subprocess_env(extra: dict[str, str] | None) -> dict[str, str] | None:
     return merged
 
 
-def opencode_review_config(web_search: bool = True) -> dict[str, Any]:
+def reference_runtime_directory(reference: "ReviewReference") -> Path | None:
+    if reference.kind == "local_path":
+        return reference.path
+    return reference.runtime_path
+
+
+def native_reference_directories(references: list["ReviewReference"]) -> list[Path]:
+    paths: list[Path] = []
+    for reference in references:
+        path = reference_runtime_directory(reference)
+        if path is not None:
+            paths.append(path)
+    return paths
+
+
+def all_references_have_directory(references: list["ReviewReference"]) -> bool:
+    return len(native_reference_directories(references)) == len(references)
+
+
+def opencode_reference_config(references: list["ReviewReference"]) -> dict[str, Any]:
+    config: dict[str, Any] = {}
+    for reference in references:
+        path = reference_runtime_directory(reference)
+        if path is None:
+            continue
+        item: dict[str, Any] = {"path": str(path)}
+        if reference.description:
+            item["description"] = reference.description
+        if reference.hidden:
+            item["hidden"] = True
+        config[reference.alias] = item
+    return config
+
+
+def opencode_review_config(web_search: bool = True, references: list["ReviewReference"] | None = None) -> dict[str, Any]:
     permission: dict[str, Any] = {
         "*": "deny",
         "read": {
@@ -140,7 +174,7 @@ def opencode_review_config(web_search: bool = True) -> dict[str, Any]:
     else:
         permission["websearch"] = "deny"
         permission["webfetch"] = "deny"
-    return {
+    config: dict[str, Any] = {
         "$schema": "https://opencode.ai/config.json",
         "autoupdate": False,
         "command": {},
@@ -157,12 +191,15 @@ def opencode_review_config(web_search: bool = True) -> dict[str, Any]:
             "write": False,
         },
     }
+    if references:
+        config["references"] = opencode_reference_config(references)
+    return config
 
 
-def opencode_review_env(web_search: bool = True) -> dict[str, str]:
+def opencode_review_env(web_search: bool = True, references: list["ReviewReference"] | None = None) -> dict[str, str]:
     return {
         "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
-        "OPENCODE_CONFIG_CONTENT": json.dumps(opencode_review_config(web_search), separators=(",", ":")),
+        "OPENCODE_CONFIG_CONTENT": json.dumps(opencode_review_config(web_search, references), separators=(",", ":")),
         "OPENCODE_DISABLE_AUTOUPDATE": "1",
         "OPENCODE_DISABLE_AUTOCOMPACT": "1",
         "OPENCODE_DISABLE_MODELS_FETCH": "1",
@@ -869,6 +906,68 @@ def references_metadata(references: list[ReviewReference], strict: bool) -> dict
     }
 
 
+def engine_references(args: argparse.Namespace) -> list[ReviewReference]:
+    refs = getattr(args, "review_references", None)
+    return refs if isinstance(refs, list) else []
+
+
+def strict_references_enabled(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "effective_strict_references", getattr(args, "strict_references", False)))
+
+
+def codex_exec_supports_add_dir(args: argparse.Namespace, repo: Path) -> bool:
+    override = getattr(args, "codex_add_dir_supported", None)
+    if override is not None:
+        return bool(override)
+    codex_bin = resolve_command(args.codex_bin, repo)
+    result = run([codex_bin, "exec", "--help"], repo, check=False)
+    help_text = f"{result.stdout}\n{result.stderr}"
+    return result.returncode == 0 and "--add-dir" in help_text
+
+
+def reference_mode_for_engine(args: argparse.Namespace, repo: Path) -> str:
+    references = engine_references(args)
+    if not references:
+        return "none"
+    engine = args.engine
+    if engine == "opencode" and all_references_have_directory(references):
+        return "native_config"
+    if engine == "claude" and all_references_have_directory(references):
+        return "native_add_dir"
+    if engine == "codex" and all_references_have_directory(references) and codex_exec_supports_add_dir(args, repo):
+        return "native_add_dir"
+    return "prompt_manifest"
+
+
+def enforce_reference_mode(args: argparse.Namespace, repo: Path) -> str:
+    references = engine_references(args)
+    mode = reference_mode_for_engine(args, repo)
+    if references and strict_references_enabled(args) and mode == "prompt_manifest":
+        aliases = ", ".join(reference.alias for reference in references)
+        raise SystemExit(
+            f"{args.engine} engine cannot provide native directory access for references in strict mode: {aliases}"
+        )
+    return mode
+
+
+def references_metadata_by_engine(
+    references: list[ReviewReference],
+    strict: bool,
+    reviewers: list[argparse.Namespace],
+    repo: Path,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for reviewer in reviewers:
+        mode = reference_mode_for_engine(reviewer, repo)
+        result[reviewer.engine] = {
+            "mode": mode,
+            "strict": strict,
+            "count": len(references),
+            "aliases": [reference.alias for reference in references],
+        }
+    return result
+
+
 def render_reference_manifest(references: list[ReviewReference], strict: bool) -> str:
     if not references:
         return ""
@@ -1060,6 +1159,7 @@ def format_version(version: tuple[int, int, int]) -> str:
 def run_codex(args: argparse.Namespace, repo: Path, prompt: str) -> str:
     if not args.tools:
         raise SystemExit("--no-tools is not supported by the Codex engine; use --engine claude --no-tools for a no-tools run")
+    reference_mode = enforce_reference_mode(args, repo)
     schema_path = write_json_temp(SCHEMA)
     output_path = Path(tempfile.NamedTemporaryFile("w", suffix=".json", delete=False).name)
     cmd = [resolve_command(args.codex_bin, repo), "--ask-for-approval", "never"]
@@ -1071,6 +1171,9 @@ def run_codex(args: argparse.Namespace, repo: Path, prompt: str) -> str:
         cmd.extend(["-c", f'model_reasoning_effort="{args.thinking}"'])
     cmd.extend(codex_config_isolation_flags(repo))
     cmd.append("exec")
+    if reference_mode == "native_add_dir":
+        for path in native_reference_directories(engine_references(args)):
+            cmd.extend(["--add-dir", str(path)])
     if args.stream_engine_output:
         cmd.append("--json")
     cmd.extend(
@@ -1108,6 +1211,7 @@ def run_codex(args: argparse.Namespace, repo: Path, prompt: str) -> str:
 
 def run_claude(args: argparse.Namespace, repo: Path, prompt: str) -> str:
     ensure_claude_isolation_supported(args, repo)
+    reference_mode = enforce_reference_mode(args, repo)
     cmd = [
         resolve_command(args.claude_bin, repo),
         *claude_review_isolation_flags(),
@@ -1118,6 +1222,9 @@ def run_claude(args: argparse.Namespace, repo: Path, prompt: str) -> str:
         "--json-schema",
         json.dumps(SCHEMA),
     ]
+    if reference_mode == "native_add_dir":
+        for path in native_reference_directories(engine_references(args)):
+            cmd.extend(["--add-dir", str(path)])
     if args.tools:
         cmd.extend(["--allowedTools", claude_allowed_tools(args)])
     else:
@@ -1144,6 +1251,7 @@ def run_claude(args: argparse.Namespace, repo: Path, prompt: str) -> str:
 
 
 def run_droid(args: argparse.Namespace, repo: Path, prompt: str) -> str:
+    enforce_reference_mode(args, repo)
     prompt_path = Path(tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False).name)
     prompt_path.write_text(prompt)
     cmd = [
@@ -1170,6 +1278,7 @@ def run_droid(args: argparse.Namespace, repo: Path, prompt: str) -> str:
 
 
 def run_copilot(args: argparse.Namespace, repo: Path, prompt: str) -> str:
+    enforce_reference_mode(args, repo)
     if args.thinking:
         raise SystemExit("--thinking is not supported by the copilot engine")
     if not args.tools:
@@ -1230,6 +1339,8 @@ def build_opencode_cmd(args: argparse.Namespace, repo: Path) -> list[str]:
 def run_opencode(args: argparse.Namespace, repo: Path, prompt: str) -> str:
     if not args.tools:
         raise SystemExit("--no-tools is not supported by the opencode engine")
+    reference_mode = enforce_reference_mode(args, repo)
+    references = engine_references(args) if reference_mode == "native_config" else []
     cmd = build_opencode_cmd(args, repo)
     with tempfile.TemporaryDirectory(prefix="autoreview-opencode-run.") as tempdir:
         result = run_with_heartbeat(
@@ -1238,7 +1349,7 @@ def run_opencode(args: argparse.Namespace, repo: Path, prompt: str) -> str:
             input_text=prompt,
             label="opencode",
             stream_output=args.stream_engine_output,
-            env=opencode_review_env(args.web_search),
+            env=opencode_review_env(args.web_search, references),
         )
     if result.returncode != 0:
         raise SystemExit(f"opencode engine failed ({result.returncode})\n{result.stderr or result.stdout}")
@@ -1246,6 +1357,7 @@ def run_opencode(args: argparse.Namespace, repo: Path, prompt: str) -> str:
 
 
 def run_pi(args: argparse.Namespace, repo: Path, prompt: str) -> str:
+    enforce_reference_mode(args, repo)
     pi_bin = ensure_pi_isolation_supported(args, repo)
     cmd = [
         pi_bin,
@@ -1589,8 +1701,14 @@ import os
 from pathlib import Path
 import sys
 
-record = os.environ["AUTOREVIEW_FAKE_RECORD"]
 args = sys.argv[1:]
+if args == ["exec", "--help"]:
+    if os.environ.get("AUTOREVIEW_FAKE_CODEX_ADD_DIR", "1") == "1":
+        print("Usage: codex exec [OPTIONS]\n      --add-dir <DIR>  Additional directory access")
+    else:
+        print("Usage: codex exec [OPTIONS]")
+    raise SystemExit(0)
+record = os.environ["AUTOREVIEW_FAKE_RECORD"]
 Path(record).write_text(json.dumps({"argv": args, "cwd": os.getcwd(), "stdin": sys.stdin.read()}))
 try:
     output_path = args[args.index("--output-last-message") + 1]
@@ -1705,6 +1823,9 @@ def self_test_engine_isolation() -> int:
         opencode_bin = root / "opencode"
         record_path = root / "record.json"
         pi_invocations_path = root / "pi-invocations.jsonl"
+        reference_dir = root / "reference-docs"
+        reference_dir.mkdir()
+        (reference_dir / "guide.md").write_text("reference guide\n")
         write_executable(codex_bin, fake_codex_script())
         write_executable(claude_bin, fake_claude_script())
         write_executable(pi_bin, fake_pi_script())
@@ -1721,11 +1842,21 @@ def self_test_engine_isolation() -> int:
             thinking=None,
             stream_engine_output=False,
             claude_allowed_tools="Read,Grep,Glob,WebSearch,WebFetch",
+            review_references=[
+                ReviewReference(
+                    alias="docs",
+                    kind="local_path",
+                    path=reference_dir.resolve(),
+                    description="Reference docs",
+                )
+            ],
+            effective_strict_references=False,
         )
 
         os.environ["AUTOREVIEW_FAKE_RECORD"] = str(record_path)
         os.environ["AUTOREVIEW_FAKE_PI_INVOCATIONS"] = str(pi_invocations_path)
         try:
+            args.engine = "codex"
             run_codex(args, repo, "review hostile patch")
             codex_record = json.loads(record_path.read_text())
             codex_argv = codex_record["argv"]
@@ -1738,21 +1869,27 @@ def self_test_engine_isolation() -> int:
                 "--ephemeral",
                 str(repo),
                 "read-only",
+                "--add-dir",
+                str(reference_dir.resolve()),
             ]:
                 if required not in codex_argv:
                     raise SystemExit(f"codex isolation self-test failed: missing {required}")
             if Path(codex_record["cwd"]).resolve() != repo.resolve():
                 raise SystemExit("codex isolation self-test failed: wrong cwd")
 
+            args.engine = "claude"
             run_claude(args, repo, "review hostile patch")
             claude_record = json.loads(record_path.read_text())
             claude_argv = claude_record["argv"]
             for required in claude_review_isolation_flags():
                 if required not in claude_argv:
                     raise SystemExit(f"claude isolation self-test failed: missing {required}")
+            if "--add-dir" not in claude_argv or str(reference_dir.resolve()) not in claude_argv:
+                raise SystemExit("claude isolation self-test failed: missing reference add-dir")
             if Path(claude_record["cwd"]).resolve() != repo.resolve():
                 raise SystemExit("claude isolation self-test failed: wrong cwd")
 
+            args.engine = "pi"
             run_pi(args, repo, f"review hostile patch\nRepository: {repo}")
             pi_record = json.loads(record_path.read_text())
             pi_argv = pi_record["argv"]
@@ -1774,6 +1911,7 @@ def self_test_engine_isolation() -> int:
                 if Path(entry["cwd"]).resolve() == repo.resolve():
                     raise SystemExit("pi isolation self-test failed: probe ran inside hostile repo")
 
+            args.engine = "opencode"
             run_opencode(args, repo, "review hostile patch")
             opencode_record = json.loads(record_path.read_text())
             opencode_argv = opencode_record["argv"]
@@ -1796,6 +1934,11 @@ def self_test_engine_isolation() -> int:
             config = json.loads(opencode_env["OPENCODE_CONFIG_CONTENT"])
             if config.get("instructions") != [] or config.get("plugin") != [] or config.get("command") != {}:
                 raise SystemExit("opencode isolation self-test failed: project-controlled extensions not cleared")
+            reference_config = config.get("references", {}).get("docs")
+            if not isinstance(reference_config, dict) or reference_config.get("path") != str(reference_dir.resolve()):
+                raise SystemExit("opencode isolation self-test failed: reference config missing")
+            if reference_config.get("description") != "Reference docs":
+                raise SystemExit("opencode isolation self-test failed: reference description missing")
             for disabled_tool in ("bash", "edit", "skill", "task", "todowrite", "write"):
                 if config.get("tools", {}).get(disabled_tool) is not False:
                     raise SystemExit(f"opencode isolation self-test failed: {disabled_tool} tool not disabled")
@@ -2188,6 +2331,64 @@ def self_test_references() -> None:
             metadata = references_metadata(refs, strict)
             if metadata["count"] != 4 or metadata["items"][0]["access"] != "read-only":
                 raise SystemExit("reference self-test failed: metadata shape invalid")
+            opencode_args = argparse.Namespace(
+                engine="opencode",
+                review_references=refs,
+                effective_strict_references=True,
+            )
+            if reference_mode_for_engine(opencode_args, repo) != "native_config":
+                raise SystemExit("reference self-test failed: opencode should use native_config")
+            opencode_config = opencode_review_config(False, refs)
+            if set(opencode_config.get("references", {})) != set(by_alias):
+                raise SystemExit("reference self-test failed: opencode references config aliases missing")
+            if opencode_config["references"]["gitdocs"].get("hidden") is not True:
+                raise SystemExit("reference self-test failed: opencode hidden reference missing")
+            claude_args = argparse.Namespace(
+                engine="claude",
+                review_references=refs,
+                effective_strict_references=True,
+            )
+            if reference_mode_for_engine(claude_args, repo) != "native_add_dir":
+                raise SystemExit("reference self-test failed: claude should use native_add_dir")
+            codex_args = argparse.Namespace(
+                engine="codex",
+                review_references=refs,
+                effective_strict_references=True,
+                codex_add_dir_supported=True,
+            )
+            if reference_mode_for_engine(codex_args, repo) != "native_add_dir":
+                raise SystemExit("reference self-test failed: codex supported path should use native_add_dir")
+            codex_unsupported_args = argparse.Namespace(
+                engine="codex",
+                review_references=refs,
+                effective_strict_references=False,
+                codex_add_dir_supported=False,
+            )
+            if reference_mode_for_engine(codex_unsupported_args, repo) != "prompt_manifest":
+                raise SystemExit("reference self-test failed: unsupported codex should degrade to prompt_manifest")
+            codex_unsupported_args.effective_strict_references = True
+            try:
+                enforce_reference_mode(codex_unsupported_args, repo)
+                raise SystemExit("reference self-test failed: unsupported strict codex accepted")
+            except SystemExit as exc:
+                if "strict mode" not in str(exc):
+                    raise
+            pi_args = argparse.Namespace(engine="pi", review_references=refs, effective_strict_references=False)
+            if enforce_reference_mode(pi_args, repo) != "prompt_manifest":
+                raise SystemExit("reference self-test failed: pi should use prompt_manifest")
+            pi_args.effective_strict_references = True
+            try:
+                enforce_reference_mode(pi_args, repo)
+                raise SystemExit("reference self-test failed: strict pi accepted prompt-only references")
+            except SystemExit as exc:
+                if "strict mode" not in str(exc):
+                    raise
+            droid_args = argparse.Namespace(engine="droid", review_references=refs, effective_strict_references=False)
+            if enforce_reference_mode(droid_args, repo) != "prompt_manifest":
+                raise SystemExit("reference self-test failed: droid should use prompt_manifest")
+            modes = references_metadata_by_engine(refs, strict, [opencode_args, claude_args, codex_args, pi_args, droid_args], repo)
+            if modes["opencode"]["mode"] != "native_config" or modes["pi"]["mode"] != "prompt_manifest":
+                raise SystemExit("reference self-test failed: per-engine metadata modes invalid")
         finally:
             if workspace:
                 shutil.rmtree(workspace, ignore_errors=True)
@@ -2848,9 +3049,11 @@ def main() -> int:
     if args.self_test_references:
         self_test_references()
         return 0
-    reviewers = reviewer_args(args)
     repo = repo_root()
     references, strict_references, reference_workspace = build_references(args, repo)
+    args.review_references = references
+    args.effective_strict_references = strict_references
+    reviewers = reviewer_args(args)
     reference_manifest = render_reference_manifest(references, strict_references)
     target, target_ref = choose_target(repo, args.mode, args.base)
     print(f"autoreview target: {target}")
@@ -2870,9 +3073,13 @@ def main() -> int:
     if references:
         print(f"references: {len(references)}")
         print("references_metadata: " + json.dumps(references_metadata(references, strict_references), sort_keys=True))
+        print("reference_modes_by_engine: " + json.dumps(references_metadata_by_engine(references, strict_references, reviewers, repo), sort_keys=True))
     display_ref = args.commit if target == "commit" else target_ref
     if display_ref:
         print(f"ref: {display_ref}")
+    if references and strict_references:
+        for reviewer in reviewers:
+            enforce_reference_mode(reviewer, repo)
     if args.dry_run:
         if reference_workspace:
             shutil.rmtree(reference_workspace, ignore_errors=True)
