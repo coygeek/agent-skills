@@ -208,7 +208,7 @@ CLI flags take precedence over environment variables.
 | `AUTOREVIEW_<ENGINE>_THINKING` | Per-engine thinking override |
 | `AUTOREVIEW_CLAUDE_FALLBACK_MODEL` | Claude-only fallback chain |
 
-Codex maps thinking to `model_reasoning_effort`. Claude maps thinking to `--effort`. Droid and Copilot reject `--thinking`. Only Claude accepts `--fallback-model`; non-Claude engine-specific fallback overrides, including `AUTOREVIEW_<NONCLAUDE>_FALLBACK_MODEL`, fail closed instead of being silently ignored.
+Codex maps thinking to `model_reasoning_effort`. Claude maps thinking to `--effort`. Droid and Copilot reject `--thinking`. Only Claude accepts `--fallback-model`; global CLI fallback requires at least one Claude reviewer, while non-Claude engine-specific fallback overrides, including `AUTOREVIEW_<NONCLAUDE>_FALLBACK_MODEL`, fail closed instead of being silently ignored.
 
 ## Review engine isolation
 

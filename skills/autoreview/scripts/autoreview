@@ -1433,6 +1433,9 @@ def reviewer_args(args: argparse.Namespace) -> list[argparse.Namespace]:
     else:
         reviewers = [(args.engine, None, None)]
 
+    if global_fallback and not any(engine == "claude" for engine, _, _ in reviewers):
+        raise SystemExit("--fallback-model is only supported for claude; no claude reviewer selected")
+
     seen: set[str] = set()
     result: list[argparse.Namespace] = []
     for engine, inline_model, inline_thinking in reviewers:
@@ -1651,6 +1654,17 @@ def self_test_fallback_scope() -> None:
         )[0]
         if cli_engine.fallback_model != "cli-claude":
             raise SystemExit("self-test fallback scope failed: CLI engine fallback should override CLI global")
+        panel = reviewer_args(reviewer_test_args(reviewers="codex,claude", fallback_model=["cli-global"]))
+        panel_codex = next(r for r in panel if r.engine == "codex")
+        panel_claude = next(r for r in panel if r.engine == "claude")
+        if panel_codex.fallback_model is not None or panel_claude.fallback_model != "cli-global":
+            raise SystemExit("self-test fallback scope failed: CLI global fallback should apply only to Claude panel reviewers")
+        try:
+            reviewer_args(reviewer_test_args(engine="codex", fallback_model=["cli-global"]))
+            raise SystemExit("self-test fallback scope failed: global fallback without Claude should be rejected")
+        except SystemExit as exc:
+            if "no claude reviewer selected" not in str(exc):
+                raise
         inline = reviewer_args(
             reviewer_test_args(
                 reviewers="claude:inline-model:high",
