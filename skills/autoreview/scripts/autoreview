@@ -758,13 +758,14 @@ def run_pi(args: argparse.Namespace, repo: Path, prompt: str) -> str:
         cmd.extend(["--tools", "read,grep,find,ls"])
     else:
         cmd.append("--no-tools")
-    result = run_with_heartbeat(
-        cmd,
-        repo,
-        input_text=prompt,
-        label="pi",
-        stream_output=args.stream_engine_output,
-    )
+    with tempfile.TemporaryDirectory(prefix="autoreview-pi-run.") as tempdir:
+        result = run_with_heartbeat(
+            cmd,
+            Path(tempdir),
+            input_text=prompt,
+            label="pi",
+            stream_output=args.stream_engine_output,
+        )
     if result.returncode != 0:
         raise SystemExit(f"pi engine failed ({result.returncode})\n{result.stderr or result.stdout}")
     return result.stdout
@@ -1209,14 +1210,16 @@ def self_test_engine_isolation() -> int:
             if Path(claude_record["cwd"]).resolve() != repo.resolve():
                 raise SystemExit("claude isolation self-test failed: wrong cwd")
 
-            run_pi(args, repo, "review hostile patch")
+            run_pi(args, repo, f"review hostile patch\nRepository: {repo}")
             pi_record = json.loads(record_path.read_text())
             pi_argv = pi_record["argv"]
             for required in ["--print", *pi_review_isolation_flags(), "--tools", "read,grep,find,ls"]:
                 if required not in pi_argv:
                     raise SystemExit(f"pi isolation self-test failed: missing {required}")
-            if Path(pi_record["cwd"]).resolve() != repo.resolve():
-                raise SystemExit("pi isolation self-test failed: wrong cwd")
+            if Path(pi_record["cwd"]).resolve() == repo.resolve():
+                raise SystemExit("pi isolation self-test failed: review ran inside hostile repo")
+            if str(repo) not in pi_record["stdin"]:
+                raise SystemExit("pi isolation self-test failed: prompt omitted reviewed repo path")
             pi_invocations = [
                 json.loads(line)
                 for line in pi_invocations_path.read_text().splitlines()
