@@ -6,6 +6,8 @@ param(
     [ValidateSet('codex', 'claude', 'droid', 'copilot', 'pi', 'opencode')]
     [string[]] $Engine,
 
+    [switch] $ReferenceFixtures,
+
     [Alias('h')]
     [switch] $Help
 )
@@ -27,6 +29,10 @@ if ($PSBoundParameters.ContainsKey('Engine')) {
     foreach ($SelectedEngine in $Engine) {
         $ForwardedArgs += @('--engine', $SelectedEngine)
     }
+}
+
+if ($ReferenceFixtures) {
+    $ForwardedArgs += '--reference-fixtures'
 }
 
 $PyLauncher = Get-Command py -ErrorAction SilentlyContinue
