@@ -167,13 +167,11 @@ For models with slashes or extra colons, prefer keyed form:
 
 The helper accepts `--model` globally or per engine (`engine=model`) and `--thinking` globally or per engine (`engine=level`). Repeat either flag for multiple reviewers.
 
-On current `main`, Droid supports `--model` only; `--thinking` is rejected until Droid reasoning support lands.
-
 | Engine | Model flag | Example model IDs | Thinking flag | Accepted levels |
 |--------|------------|-------------------|---------------|-----------------|
 | **codex** (default) | `codex --model X exec ...` | `gpt-5.1`, `o3` | `-c model_reasoning_effort=Y` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh` |
 | **claude** | `claude --model X` | `sonnet`, `opus`, `haiku`, full Anthropic IDs | `--effort Y` | `low`, `medium`, `high`, `xhigh`, `max` |
-| **droid** | `droid exec --model X` | `claude-opus-4-8`, Factory model IDs | not supported on `main` | n/a |
+| **droid** | `droid exec --model X` | `claude-opus-4-8`, Factory model IDs | `-r, --reasoning-effort Y` | `off`, `none`, `low`, `medium`, `high` |
 | **copilot** | `copilot --model X` | `gpt-5.2`, Copilot model aliases | not supported | n/a |
 
 Claude also supports `--fallback-model a,b` for availability-based fallback chains ([model-config](https://code.claude.com/docs/en/model-config)). Current Claude docs note that auth, billing, rate-limit, request-size, and transport errors do not trigger fallback, and the changelog documents interactive-session support in `v2.1.166`.
@@ -188,8 +186,8 @@ Examples matching current `main` behavior:
 "$AUTOREVIEW" --engine claude --model sonnet --thinking max
 "$AUTOREVIEW" --engine claude --model opus --fallback-model sonnet,haiku
 
-# Factory Droid (model only)
-"$AUTOREVIEW" --engine droid --model claude-opus-4-8
+# Factory Droid with explicit model and reasoning effort
+"$AUTOREVIEW" --engine droid --model claude-opus-4-8 --thinking low
 
 # GitHub Copilot (model only; no thinking knob)
 "$AUTOREVIEW" --engine copilot --model gpt-5.2
@@ -208,7 +206,7 @@ CLI flags take precedence over environment variables.
 | `AUTOREVIEW_<ENGINE>_THINKING` | Per-engine thinking override |
 | `AUTOREVIEW_CLAUDE_FALLBACK_MODEL` | Claude-only fallback chain |
 
-Codex maps thinking to `model_reasoning_effort`. Claude maps thinking to `--effort`. Droid and Copilot reject `--thinking`. Only Claude accepts `--fallback-model`; global CLI/env fallback requires at least one Claude reviewer, and engine-specific fallback overrides require that reviewer to be selected. Non-Claude fallback overrides, including `AUTOREVIEW_<NONCLAUDE>_FALLBACK_MODEL`, fail closed instead of being silently ignored.
+Codex maps thinking to `model_reasoning_effort`. Claude maps thinking to `--effort`. Droid maps thinking to `-r, --reasoning-effort`. Copilot rejects `--thinking`. Only Claude accepts `--fallback-model`; global CLI/env fallback requires at least one Claude reviewer, and engine-specific fallback overrides require that reviewer to be selected. Non-Claude fallback overrides, including `AUTOREVIEW_<NONCLAUDE>_FALLBACK_MODEL`, fail closed instead of being silently ignored.
 
 ## Review engine isolation
 
@@ -268,6 +266,7 @@ The helper:
 - honors `AUTOREVIEW_MODEL`, `AUTOREVIEW_THINKING`, `AUTOREVIEW_FALLBACK_MODEL`, and per-engine `AUTOREVIEW_<ENGINE>_MODEL` / `AUTOREVIEW_<ENGINE>_THINKING` environment defaults when CLI flags are omitted
 - allows read-only tools and web search by default where the selected CLI supports them; forbids nested review in the prompt; Codex is run through `codex exec` with read-only sandbox, reviewed-repo instruction/config/rule isolation flags, and structured output
 - runs Claude with `--safe-mode` (`v2.1.169+`), `--setting-sources user`, MCP disabled, explicit allowed tools, and `--fallback-model` when set, so reviewed-repo hooks/skills/MCP do not affect the review run while normal auth still works; managed settings policy can still apply
+- runs Droid with `droid exec` in read-only mode, forwards `--model` and `-r, --reasoning-effort`, and switches `--output-format` to `stream-json` when streaming is enabled
 - prints `review still running: <engine> elapsed=<seconds>s pid=<pid>` to stderr at long-running intervals while waiting for the selected review engine, unless streamed output or compact Codex activity has been visible recently
 - prints `autoreview clean: no accepted/actionable findings reported` when the selected review command exits 0
 - exits nonzero when accepted/actionable findings are present
