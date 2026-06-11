@@ -1080,7 +1080,7 @@ def reference_mode_for_engine(args: argparse.Namespace, repo: Path) -> str:
             references,
             assume_unmaterialized_git=assume_git_dirs,
         )
-        and codex_exec_supports_add_dir(args, repo)
+        and (assume_git_dirs or codex_exec_supports_add_dir(args, repo))
     ):
         return "native_add_dir"
     return "prompt_manifest"
@@ -2497,6 +2497,16 @@ def self_test_references() -> None:
         if reference_mode_for_engine(dry_codex_args, repo) != "native_add_dir":
             raise SystemExit("reference self-test failed: dry-run git references should plan native codex mode")
         enforce_reference_mode(dry_codex_args, repo)
+        dry_codex_no_probe_args = argparse.Namespace(
+            engine="codex",
+            review_references=dry_refs,
+            effective_strict_references=True,
+            codex_bin=str(root / "missing-codex"),
+            dry_run=True,
+        )
+        if reference_mode_for_engine(dry_codex_no_probe_args, repo) != "native_add_dir":
+            raise SystemExit("reference self-test failed: dry-run codex mode should not probe binary")
+        enforce_reference_mode(dry_codex_no_probe_args, repo)
         dry_claude_args = argparse.Namespace(
             engine="claude",
             review_references=dry_refs,
