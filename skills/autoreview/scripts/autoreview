@@ -125,7 +125,7 @@ def subprocess_env(extra: dict[str, str] | None) -> dict[str, str] | None:
 
 def reference_runtime_directory(reference: "ReviewReference") -> Path | None:
     if reference.kind == "local_path":
-        candidate = reference.path
+        candidate = reference.runtime_path or reference.path
     else:
         candidate = reference.runtime_path
     if candidate is not None and candidate.is_dir():
@@ -826,10 +826,6 @@ def validate_local_reference_path(path: Path, repo: Path) -> Path:
     reason = risky_reference_path(resolved, Path.home())
     if reason:
         raise SystemExit(f"unsafe reference path {resolved}: {reason}")
-    if resolved.is_file():
-        parent_reason = risky_reference_path(resolved.parent, Path.home())
-        if parent_reason:
-            raise SystemExit(f"unsafe reference file parent {resolved.parent}: {parent_reason}")
     return resolved
 
 
@@ -950,8 +946,32 @@ def build_references(args: argparse.Namespace, repo: Path) -> tuple[list[ReviewR
         apply_reference_description(match, raw)
     if getattr(args, "dry_run", False):
         return references, strict, None
-    workspace = materialize_git_references(references, repo, strict)
+    workspace = materialize_local_file_references(references)
+    workspace = materialize_git_references(references, repo, strict, workspace)
     return references, strict, workspace
+
+
+def ensure_reference_workspace(workspace: Path | None) -> Path:
+    return workspace or Path(tempfile.mkdtemp(prefix="autoreview-references.")).resolve()
+
+
+def materialize_local_file_references(references: list[ReviewReference], workspace: Path | None = None) -> Path | None:
+    file_refs = [
+        reference
+        for reference in references
+        if reference.kind == "local_path" and reference.path is not None and reference.path.is_file()
+    ]
+    if not file_refs:
+        return workspace
+    workspace = ensure_reference_workspace(workspace)
+    for reference in file_refs:
+        assert reference.path is not None
+        dest_dir = workspace / reference.alias
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / reference.path.name
+        shutil.copy2(reference.path, dest)
+        reference.runtime_path = dest.resolve()
+    return workspace
 
 
 def clone_git_reference(source: str, dest: Path, ref: str | None, repo: Path) -> subprocess.CompletedProcess[str]:
@@ -978,11 +998,16 @@ def clone_git_reference(source: str, dest: Path, ref: str | None, repo: Path) ->
     return checkout_result
 
 
-def materialize_git_references(references: list[ReviewReference], repo: Path, strict: bool) -> Path | None:
+def materialize_git_references(
+    references: list[ReviewReference],
+    repo: Path,
+    strict: bool,
+    workspace: Path | None = None,
+) -> Path | None:
     git_refs = [reference for reference in references if reference.kind == "git"]
     if not git_refs:
-        return None
-    workspace = Path(tempfile.mkdtemp(prefix="autoreview-references.")).resolve()
+        return workspace
+    workspace = ensure_reference_workspace(workspace)
     for reference in git_refs:
         assert reference.repository
         dest = workspace / reference.alias
@@ -2530,8 +2555,14 @@ def self_test_references() -> None:
             native_dirs = native_reference_directories(refs)
             if by_alias["filedocs"].path in native_dirs:
                 raise SystemExit("reference self-test failed: file reference treated as native directory")
-            if by_alias["filedocs"].path.parent not in native_dirs:
-                raise SystemExit("reference self-test failed: file reference parent not exposed natively")
+            if by_alias["filedocs"].runtime_path is None:
+                raise SystemExit("reference self-test failed: file reference was not materialized")
+            if by_alias["filedocs"].runtime_path.parent not in native_dirs:
+                raise SystemExit("reference self-test failed: materialized file reference parent not exposed natively")
+            if by_alias["filedocs"].path.parent in native_dirs:
+                raise SystemExit("reference self-test failed: original file parent exposed natively")
+            if not is_within(by_alias["filedocs"].runtime_path, workspace):
+                raise SystemExit("reference self-test failed: file materialized outside temp workspace")
             manifest = render_reference_manifest(refs, strict)
             for needle in (
                 "# Review References",
