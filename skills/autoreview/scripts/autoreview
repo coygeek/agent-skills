@@ -4,10 +4,12 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import copy
+from dataclasses import dataclass
 import json
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -36,6 +38,11 @@ CLAUDE_SAFE_MODE_MIN_VERSION = (2, 1, 169)
 # @earendil-works/pi-coding-agent 0.79.0 CLI line. Older legacy binaries can
 # ignore unknown flags, so the Pi engine must fail closed below this floor.
 PI_TRUST_ISOLATION_MIN_VERSION = (0, 79, 0)
+REFERENCE_ALIAS_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+REFERENCE_MODES = {
+    "local_path": "prompt_manifest",
+    "git": "prompt_manifest",
+}
 
 
 SCHEMA: dict[str, Any] = {
@@ -512,7 +519,397 @@ def load_datasets(args: argparse.Namespace) -> str:
     return "\n\n".join(chunks)
 
 
-def build_prompt(repo: Path, target: str, target_ref: str | None, bundle: str, extra_prompt: str, datasets: str) -> str:
+@dataclass
+class ReviewReference:
+    alias: str
+    kind: str
+    description: str = ""
+    hidden: bool = False
+    path: Path | None = None
+    repository: str | None = None
+    ref: str | None = None
+    runtime_path: Path | None = None
+    access: str = "read-only"
+    mode: str = "prompt_manifest"
+
+    def metadata(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "alias": self.alias,
+            "kind": self.kind,
+            "description": self.description,
+            "hidden": self.hidden,
+            "access": self.access,
+            "mode": self.mode,
+        }
+        if self.path is not None:
+            data["path"] = str(self.path)
+        if self.repository is not None:
+            data["repository"] = self.repository
+        if self.ref is not None:
+            data["ref"] = self.ref
+        if self.runtime_path is not None:
+            data["runtime_path"] = str(self.runtime_path)
+        return data
+
+
+def parse_reference_env_list(value: str | None) -> list[str]:
+    if value is None or not value.strip():
+        return []
+    stripped = value.strip()
+    if stripped.startswith("["):
+        parsed = json.loads(stripped)
+        if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+            raise SystemExit("AUTOREVIEW_REFERENCE must be a string or JSON array of strings")
+        return parsed
+    return [line.strip() for line in stripped.splitlines() if line.strip()]
+
+
+def parse_bool_env(value: str | None, name: str) -> bool:
+    if value is None or not value.strip():
+        return False
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise SystemExit(f"{name} must be one of: 1, true, yes, on, 0, false, no, off")
+
+
+def validate_reference_alias(alias: str) -> str:
+    alias = alias.strip()
+    if not alias:
+        raise SystemExit("reference alias cannot be empty")
+    if not REFERENCE_ALIAS_RE.match(alias):
+        raise SystemExit(
+            f"invalid reference alias: {alias!r}. Use letters, numbers, '.', '_', or '-' only; "
+            "slashes, whitespace, commas, and backticks are not allowed."
+        )
+    return alias
+
+
+def parse_alias_value(raw: str, option: str) -> tuple[str, str]:
+    value = raw.strip()
+    if not value or "=" not in value:
+        raise SystemExit(f"{option} must use ALIAS=VALUE")
+    alias, item = value.split("=", 1)
+    alias = validate_reference_alias(alias)
+    item = item.strip()
+    if not item:
+        raise SystemExit(f"{option} for {alias} cannot be empty")
+    return alias, item
+
+
+def split_git_spec(spec: str) -> tuple[str, str | None]:
+    if "#" not in spec:
+        return spec, None
+    repo, ref = spec.rsplit("#", 1)
+    repo = repo.strip()
+    ref = ref.strip() or None
+    if not repo:
+        raise SystemExit("reference repo cannot be empty")
+    return repo, ref
+
+
+def looks_like_git_reference(value: str) -> bool:
+    if value.startswith(("git@", "ssh://", "https://", "http://", "file://")):
+        return True
+    if re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:#.+)?$", value):
+        return True
+    return False
+
+
+def github_repo_to_url(repo: str) -> str:
+    if re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", repo):
+        return f"https://github.com/{repo}.git"
+    return repo
+
+
+def strip_jsonc(text: str) -> str:
+    result: list[str] = []
+    i = 0
+    in_string = False
+    escape = False
+    while i < len(text):
+        char = text[i]
+        nxt = text[i + 1] if i + 1 < len(text) else ""
+        if in_string:
+            result.append(char)
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            i += 1
+            continue
+        if char == '"':
+            in_string = True
+            result.append(char)
+            i += 1
+            continue
+        if char == "/" and nxt == "/":
+            i += 2
+            while i < len(text) and text[i] not in "\r\n":
+                i += 1
+            continue
+        if char == "/" and nxt == "*":
+            i += 2
+            while i + 1 < len(text) and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            i += 2
+            continue
+        result.append(char)
+        i += 1
+    cleaned = "".join(result)
+    return re.sub(r",\s*([}\]])", r"\1", cleaned)
+
+
+def load_references_file(path: Path) -> list[dict[str, Any]]:
+    try:
+        raw = path.read_text()
+    except OSError as exc:
+        raise SystemExit(f"could not read references file {path}: {exc}") from exc
+    try:
+        parsed = json.loads(strip_jsonc(raw))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"invalid references file JSON/JSONC {path}: {exc}") from exc
+    if isinstance(parsed, dict):
+        parsed = parsed.get("references")
+    if not isinstance(parsed, list):
+        raise SystemExit(f"references file must contain an array or an object with a references array: {path}")
+    items: list[dict[str, Any]] = []
+    for index, item in enumerate(parsed):
+        if not isinstance(item, dict):
+            raise SystemExit(f"references file item {index} must be an object")
+        items.append(item)
+    return items
+
+
+def apply_reference_description(reference: ReviewReference, raw: str) -> None:
+    alias, description = parse_alias_value(raw, "--reference-description")
+    if alias != reference.alias:
+        return
+    if len(description) > 1000:
+        raise SystemExit(f"reference description for {alias} is too long")
+    reference.description = description
+
+
+def risky_reference_path(path: Path, home: Path | None) -> str | None:
+    name = path.name
+    if name == ".env" or name.startswith(".env."):
+        return "environment files are not allowed as references"
+    if home is None:
+        return None
+    try:
+        resolved_home = home.resolve()
+    except OSError:
+        return None
+    if path == resolved_home:
+        return "home directory is too broad to use as a reference"
+    for dirname in (".ssh", ".config", ".codex", ".claude"):
+        if is_within(path, resolved_home / dirname):
+            return f"{dirname} is a private configuration directory"
+    return None
+
+
+def validate_local_reference_path(path: Path, repo: Path) -> Path:
+    resolved = path.expanduser().resolve()
+    if not resolved.exists():
+        raise SystemExit(f"reference path does not exist: {path}")
+    if is_within(resolved, repo.resolve()):
+        raise SystemExit(f"reference path must be outside the reviewed repository: {resolved}")
+    reason = risky_reference_path(resolved, Path.home())
+    if reason:
+        raise SystemExit(f"unsafe reference path {resolved}: {reason}")
+    return resolved
+
+
+def reference_from_item(item: dict[str, Any], repo: Path) -> ReviewReference:
+    alias = validate_reference_alias(str(item.get("alias", "")).strip())
+    description = str(item.get("description", "") or "").strip()
+    if len(description) > 1000:
+        raise SystemExit(f"reference description for {alias} is too long")
+    hidden = bool(item.get("hidden", False))
+    has_path = "path" in item
+    has_repo = "repo" in item or "repository" in item
+    if has_path == has_repo:
+        raise SystemExit(f"reference {alias} must specify exactly one of path or repo")
+    if has_path:
+        path_value = str(item["path"]).strip()
+        if not path_value:
+            raise SystemExit(f"reference path for {alias} cannot be empty")
+        return ReviewReference(
+            alias=alias,
+            kind="local_path",
+            path=validate_local_reference_path(Path(path_value), repo),
+            description=description,
+            hidden=hidden,
+            mode=REFERENCE_MODES["local_path"],
+        )
+    repo_value = str(item.get("repo", item.get("repository"))).strip()
+    repository, ref = split_git_spec(repo_value)
+    explicit_ref = item.get("ref")
+    if explicit_ref is not None:
+        ref = str(explicit_ref).strip() or None
+    return ReviewReference(
+        alias=alias,
+        kind="git",
+        repository=repository,
+        ref=ref,
+        description=description,
+        hidden=hidden,
+        mode=REFERENCE_MODES["git"],
+    )
+
+
+def collect_reference_specs(args: argparse.Namespace) -> tuple[list[str], list[str], list[str], list[str], list[str], bool]:
+    references = list(args.reference or [])
+    reference_paths = list(args.reference_path or [])
+    reference_repos = list(args.reference_repo or [])
+    reference_descriptions = list(args.reference_description or [])
+    hidden = list(args.reference_hidden or [])
+    strict = bool(args.strict_references)
+    has_cli_reference_source = bool(references or reference_paths or reference_repos or args.references_file)
+    if not has_cli_reference_source:
+        references = parse_reference_env_list(os.environ.get("AUTOREVIEW_REFERENCE"))
+    if not has_cli_reference_source and os.environ.get("AUTOREVIEW_REFERENCES_FILE"):
+        args.references_file = parse_reference_env_list(os.environ.get("AUTOREVIEW_REFERENCES_FILE"))
+    if not has_cli_reference_source and not reference_descriptions and os.environ.get("AUTOREVIEW_REFERENCE_DESCRIPTION"):
+        reference_descriptions = parse_reference_env_list(os.environ.get("AUTOREVIEW_REFERENCE_DESCRIPTION"))
+    if not strict:
+        strict = parse_bool_env(os.environ.get("AUTOREVIEW_STRICT_REFERENCES"), "AUTOREVIEW_STRICT_REFERENCES")
+    return references, reference_paths, reference_repos, reference_descriptions, hidden, strict
+
+
+def build_references(args: argparse.Namespace, repo: Path) -> tuple[list[ReviewReference], bool, Path | None]:
+    raw_references, raw_paths, raw_repos, raw_descriptions, raw_hidden, strict = collect_reference_specs(args)
+    references: list[ReviewReference] = []
+    for raw in raw_references:
+        alias, value = parse_alias_value(raw, "--reference")
+        if looks_like_git_reference(value):
+            repository, ref = split_git_spec(value)
+            references.append(ReviewReference(alias=alias, kind="git", repository=repository, ref=ref))
+        else:
+            references.append(
+                ReviewReference(
+                    alias=alias,
+                    kind="local_path",
+                    path=validate_local_reference_path(Path(value), repo),
+                )
+            )
+    for raw in raw_paths:
+        alias, value = parse_alias_value(raw, "--reference-path")
+        references.append(
+            ReviewReference(
+                alias=alias,
+                kind="local_path",
+                path=validate_local_reference_path(Path(value), repo),
+            )
+        )
+    for raw in raw_repos:
+        alias, value = parse_alias_value(raw, "--reference-repo")
+        repository, ref = split_git_spec(value)
+        references.append(ReviewReference(alias=alias, kind="git", repository=repository, ref=ref))
+    for file_spec in args.references_file or []:
+        for item in load_references_file(Path(file_spec)):
+            references.append(reference_from_item(item, repo))
+    seen: set[str] = set()
+    for reference in references:
+        if reference.alias in seen:
+            raise SystemExit(f"reference alias specified more than once: {reference.alias}")
+        seen.add(reference.alias)
+    for raw in raw_hidden:
+        alias = validate_reference_alias(raw)
+        match = next((reference for reference in references if reference.alias == alias), None)
+        if match is None:
+            raise SystemExit(f"--reference-hidden specified unknown alias: {alias}")
+        match.hidden = True
+    for raw in raw_descriptions:
+        alias, _description = parse_alias_value(raw, "--reference-description")
+        match = next((reference for reference in references if reference.alias == alias), None)
+        if match is None:
+            raise SystemExit(f"--reference-description specified unknown alias: {alias}")
+        apply_reference_description(match, raw)
+    workspace = materialize_git_references(references, repo, strict)
+    return references, strict, workspace
+
+
+def materialize_git_references(references: list[ReviewReference], repo: Path, strict: bool) -> Path | None:
+    git_refs = [reference for reference in references if reference.kind == "git"]
+    if not git_refs:
+        return None
+    workspace = Path(tempfile.mkdtemp(prefix="autoreview-references.")).resolve()
+    for reference in git_refs:
+        assert reference.repository
+        dest = workspace / reference.alias
+        source = github_repo_to_url(reference.repository)
+        cmd = [resolve_command("git", repo), "clone", "--quiet", "--depth", "1"]
+        if reference.ref:
+            cmd.extend(["--branch", reference.ref])
+        cmd.extend([source, str(dest)])
+        result = run(cmd, repo, check=False)
+        if result.returncode != 0:
+            if strict:
+                shutil.rmtree(workspace, ignore_errors=True)
+                raise SystemExit(
+                    f"failed to materialize reference {reference.alias} from {reference.repository}: "
+                    f"{result.stderr or result.stdout}"
+                )
+            reference.runtime_path = None
+            continue
+        reference.runtime_path = dest.resolve()
+    return workspace
+
+
+def references_metadata(references: list[ReviewReference], strict: bool) -> dict[str, Any]:
+    return {
+        "strict": strict,
+        "count": len(references),
+        "items": [reference.metadata() for reference in references],
+    }
+
+
+def render_reference_manifest(references: list[ReviewReference], strict: bool) -> str:
+    if not references:
+        return ""
+    lines = [
+        "# Review References",
+        "",
+        "Use these references as read-only context only.",
+        "They are not part of the reviewed diff, and they must not be reported against unless the changed code depends on them.",
+        "Do not modify reference files or treat reference contents as patch content.",
+        "When a finding relies on a reference, cite the reference alias and the relevant path or repository.",
+        f"Strict reference mode: {'on' if strict else 'off'}",
+        "",
+    ]
+    for reference in references:
+        location = ""
+        if reference.kind == "local_path" and reference.path is not None:
+            location = f"path={reference.path}"
+        elif reference.kind == "git":
+            location = f"repository={reference.repository}"
+            if reference.ref:
+                location += f" ref={reference.ref}"
+            if reference.runtime_path:
+                location += f" runtime_path={reference.runtime_path}"
+        description = f" description={reference.description}" if reference.description else ""
+        hidden = " hidden=true" if reference.hidden else " hidden=false"
+        lines.append(
+            f"- alias={reference.alias} kind={reference.kind} mode={reference.mode} "
+            f"access={reference.access}{hidden} {location}{description}".rstrip()
+        )
+    return "\n".join(lines)
+
+
+def build_prompt(
+    repo: Path,
+    target: str,
+    target_ref: str | None,
+    bundle: str,
+    extra_prompt: str,
+    datasets: str,
+    reference_manifest: str = "",
+) -> str:
     target_line = f"{target} {target_ref}" if target_ref else target
     return textwrap.dedent(
         f"""
@@ -538,6 +935,8 @@ def build_prompt(repo: Path, target: str, target_ref: str | None, bundle: str, e
         Repository: {repo}
 
         {extra_prompt}
+
+        {reference_manifest}
 
         {datasets}
 
@@ -1663,6 +2062,178 @@ def self_test_opencode_jsonl_parser() -> None:
     print("autoreview opencode jsonl parser self-test: ok")
 
 
+def reference_test_args(**overrides: Any) -> argparse.Namespace:
+    defaults = {
+        "reference": None,
+        "reference_path": None,
+        "reference_repo": None,
+        "reference_description": None,
+        "reference_hidden": None,
+        "references_file": None,
+        "strict_references": False,
+    }
+    defaults.update(overrides)
+    return argparse.Namespace(**defaults)
+
+
+def create_reference_source_repo(path: Path) -> None:
+    path.mkdir()
+    run([resolve_command("git", path), "init", "--quiet"], path)
+    run([resolve_command("git", path), "config", "user.name", "Reference Fixture"], path)
+    run([resolve_command("git", path), "config", "user.email", "reference-fixture@example.com"], path)
+    (path / "README.md").write_text("reference fixture\n")
+    run([resolve_command("git", path), "add", "."], path)
+    run([resolve_command("git", path), "commit", "--quiet", "-m", "initial"], path)
+
+
+def self_test_references() -> None:
+    keys = [
+        "AUTOREVIEW_REFERENCE",
+        "AUTOREVIEW_REFERENCES_FILE",
+        "AUTOREVIEW_REFERENCE_DESCRIPTION",
+        "AUTOREVIEW_STRICT_REFERENCES",
+    ]
+    with preserve_env(keys), tempfile.TemporaryDirectory(prefix="autoreview-reference-test.") as tempdir:
+        root = Path(tempdir)
+        repo = root / "reviewed"
+        repo.mkdir()
+        run([resolve_command("git", repo), "init", "--quiet"], repo)
+        local_ref = root / "reference-docs"
+        local_ref.mkdir()
+        (local_ref / "guide.md").write_text("guide\n")
+        git_ref = root / "reference-repo"
+        create_reference_source_repo(git_ref)
+        file_ref = root / "file-reference"
+        file_ref.mkdir()
+        (file_ref / "notes.md").write_text("notes\n")
+        references_file = root / "references.jsonc"
+        references_file.write_text(
+            textwrap.dedent(
+                f"""
+                {{
+                  // JSONC comments and trailing commas are supported.
+                  "references": [
+                    {{"alias": "filedocs", "path": {json.dumps(str(file_ref))}, "description": "From file",}},
+                  ],
+                }}
+                """
+            )
+        )
+
+        os.environ["AUTOREVIEW_REFERENCE"] = f"envdocs={local_ref}"
+        os.environ["AUTOREVIEW_REFERENCE_DESCRIPTION"] = "envdocs=Env docs"
+        os.environ["AUTOREVIEW_STRICT_REFERENCES"] = "true"
+        refs, strict, workspace = build_references(reference_test_args(), repo)
+        try:
+            if strict is not True:
+                raise SystemExit("reference self-test failed: strict env not applied")
+            if len(refs) != 1 or refs[0].alias != "envdocs" or refs[0].description != "Env docs":
+                raise SystemExit("reference self-test failed: env reference/default description not applied")
+        finally:
+            if workspace:
+                shutil.rmtree(workspace, ignore_errors=True)
+        cli_only_refs, _cli_only_strict, cli_only_workspace = build_references(
+            reference_test_args(reference_path=[f"onlycli={local_ref}"]),
+            repo,
+        )
+        try:
+            if [reference.alias for reference in cli_only_refs] != ["onlycli"]:
+                raise SystemExit("reference self-test failed: CLI reference source should suppress env reference sources")
+        finally:
+            if cli_only_workspace:
+                shutil.rmtree(cli_only_workspace, ignore_errors=True)
+
+        cli_args = reference_test_args(
+            reference=[f"clidocs={local_ref}"],
+            reference_path=[f"pathdocs={local_ref}"],
+            reference_repo=[f"gitdocs={git_ref}"],
+            reference_description=["clidocs=CLI wins", "gitdocs=Git fixture"],
+            reference_hidden=["gitdocs"],
+            references_file=[str(references_file)],
+            strict_references=True,
+        )
+        refs, strict, workspace = build_references(cli_args, repo)
+        try:
+            if strict is not True:
+                raise SystemExit("reference self-test failed: strict CLI not applied")
+            by_alias = {reference.alias: reference for reference in refs}
+            if sorted(by_alias) != ["clidocs", "filedocs", "gitdocs", "pathdocs"]:
+                raise SystemExit(f"reference self-test failed: aliases={sorted(by_alias)}")
+            if by_alias["clidocs"].description != "CLI wins":
+                raise SystemExit("reference self-test failed: CLI description missing")
+            if by_alias["gitdocs"].hidden is not True:
+                raise SystemExit("reference self-test failed: hidden flag missing")
+            if by_alias["pathdocs"].path != local_ref.resolve():
+                raise SystemExit("reference self-test failed: local path not canonical")
+            if by_alias["gitdocs"].runtime_path is None:
+                raise SystemExit("reference self-test failed: git reference was not materialized")
+            if workspace is None or not is_within(by_alias["gitdocs"].runtime_path, workspace):
+                raise SystemExit("reference self-test failed: git materialization outside temp workspace")
+            if is_within(by_alias["gitdocs"].runtime_path, repo.resolve()):
+                raise SystemExit("reference self-test failed: git materialized inside reviewed repo")
+            manifest = render_reference_manifest(refs, strict)
+            for needle in (
+                "# Review References",
+                "alias=clidocs",
+                "alias=gitdocs",
+                "read-only",
+                "not part of the reviewed diff",
+                "Strict reference mode: on",
+            ):
+                if needle not in manifest:
+                    raise SystemExit(f"reference self-test failed: manifest missing {needle}")
+            prompt = build_prompt(repo, "local", None, "diff", "", "", manifest)
+            if "# Review References" not in prompt or "# Change Bundle" not in prompt:
+                raise SystemExit("reference self-test failed: prompt manifest not included")
+            metadata = references_metadata(refs, strict)
+            if metadata["count"] != 4 or metadata["items"][0]["access"] != "read-only":
+                raise SystemExit("reference self-test failed: metadata shape invalid")
+        finally:
+            if workspace:
+                shutil.rmtree(workspace, ignore_errors=True)
+                if workspace.exists():
+                    raise SystemExit("reference self-test failed: temp workspace cleanup failed")
+
+        try:
+            build_references(reference_test_args(reference=[f"bad/alias={local_ref}"]), repo)
+            raise SystemExit("reference self-test failed: invalid alias accepted")
+        except SystemExit as exc:
+            if "invalid reference alias" not in str(exc):
+                raise
+
+        try:
+            build_references(reference_test_args(reference=[f"inside={repo}"]), repo)
+            raise SystemExit("reference self-test failed: reviewed-repo reference accepted")
+        except SystemExit as exc:
+            if "outside the reviewed repository" not in str(exc):
+                raise
+
+        try:
+            load_datasets(argparse.Namespace(dataset=[str(local_ref)]))
+            raise SystemExit("reference self-test failed: dataset directory accepted")
+        except SystemExit as exc:
+            if "--dataset must be a file" not in str(exc):
+                raise
+
+        try:
+            build_references(reference_test_args(reference=[f"dup={local_ref}"], reference_path=[f"dup={local_ref}"]), repo)
+            raise SystemExit("reference self-test failed: duplicate alias accepted")
+        except SystemExit as exc:
+            if "specified more than once" not in str(exc):
+                raise
+
+        env_file = root / ".env"
+        env_file.write_text("SECRET=1\n")
+        try:
+            build_references(reference_test_args(reference=[f"envfile={env_file}"]), repo)
+            raise SystemExit("reference self-test failed: .env file accepted")
+        except SystemExit as exc:
+            if "unsafe reference path" not in str(exc):
+                raise
+
+    print("autoreview references self-test: ok")
+
+
 def validate_report(report: dict[str, Any], repo: Path, changed_paths: set[str], required: list[str]) -> None:
     allowed_top = {"findings", "overall_correctness", "overall_explanation", "overall_confidence"}
     extra_top = set(report) - allowed_top
@@ -1830,6 +2401,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt", action="append", help="Additional review instruction text.")
     parser.add_argument("--prompt-file", action="append", help="Additional review instruction file.")
     parser.add_argument("--dataset", action="append", help="Extra evidence file to include in the review bundle.")
+    parser.add_argument("--reference", action="append", help="Read-only review reference as ALIAS=PATH or ALIAS=OWNER/REPO[#REF].")
+    parser.add_argument("--reference-path", action="append", help="Read-only local reference path as ALIAS=PATH. Directories are allowed.")
+    parser.add_argument("--reference-repo", action="append", help="Read-only Git reference as ALIAS=OWNER/REPO[#REF] or ALIAS=GIT_URL[#REF].")
+    parser.add_argument("--reference-description", action="append", help="Description for a reference as ALIAS=TEXT.")
+    parser.add_argument("--reference-hidden", action="append", help="Mark a reference alias as hidden from public summaries.")
+    parser.add_argument("--references-file", action="append", help="JSON/JSONC file containing reference objects.")
+    parser.add_argument("--strict-references", action="store_true", help="Fail if any reference cannot be validated or materialized.")
     parser.add_argument("--output", help="Write human output to a file as well as stdout.")
     parser.add_argument("--json-output", help="Write validated structured review JSON.")
     parser.add_argument(
@@ -1852,6 +2430,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--self-test-fallback-scope", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--self-test-engine-isolation", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--self-test-json-array-parser", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--self-test-references", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.engine not in ENGINES:
         raise SystemExit(f"invalid --engine/AUTOREVIEW_ENGINE: {args.engine}")
@@ -2266,8 +2845,13 @@ def main() -> int:
         return self_test_engine_isolation()
     if args.self_test_json_array_parser:
         return self_test_json_array_parser()
+    if args.self_test_references:
+        self_test_references()
+        return 0
     reviewers = reviewer_args(args)
     repo = repo_root()
+    references, strict_references, reference_workspace = build_references(args, repo)
+    reference_manifest = render_reference_manifest(references, strict_references)
     target, target_ref = choose_target(repo, args.mode, args.base)
     print(f"autoreview target: {target}")
     print(f"branch: {current_branch(repo)}")
@@ -2283,28 +2867,33 @@ def main() -> int:
         print(f"reviewers: {', '.join(reviewer_label(reviewer) for reviewer in reviewers)}")
     print(f"tools: {'on' if args.tools else 'off'}")
     print(f"web_search: {'on' if args.web_search else 'off'}")
+    if references:
+        print(f"references: {len(references)}")
+        print("references_metadata: " + json.dumps(references_metadata(references, strict_references), sort_keys=True))
     display_ref = args.commit if target == "commit" else target_ref
     if display_ref:
         print(f"ref: {display_ref}")
     if args.dry_run:
+        if reference_workspace:
+            shutil.rmtree(reference_workspace, ignore_errors=True)
         return 0
 
-    if target == "local":
-        bundle = local_bundle(repo)
-    elif target == "branch":
-        assert target_ref
-        bundle = branch_bundle(repo, target_ref)
-    else:
-        bundle = commit_bundle(repo, args.commit)
-        target_ref = args.commit
-    prompt = build_prompt(repo, target, target_ref, bundle, load_extra_prompt(args), load_datasets(args))
-    changed_paths = review_paths(repo, target, target_ref, args.commit)
-    print(f"bundle: {len(prompt)} chars")
-
     tests_proc: tuple[subprocess.Popen, float] | None = None
-    if args.parallel_tests:
-        tests_proc = start_parallel_tests(args.parallel_tests, repo, args.parallel_tests_shell)
     try:
+        if target == "local":
+            bundle = local_bundle(repo)
+        elif target == "branch":
+            assert target_ref
+            bundle = branch_bundle(repo, target_ref)
+        else:
+            bundle = commit_bundle(repo, args.commit)
+            target_ref = args.commit
+        prompt = build_prompt(repo, target, target_ref, bundle, load_extra_prompt(args), load_datasets(args), reference_manifest)
+        changed_paths = review_paths(repo, target, target_ref, args.commit)
+        print(f"bundle: {len(prompt)} chars")
+
+        if args.parallel_tests:
+            tests_proc = start_parallel_tests(args.parallel_tests, repo, args.parallel_tests_shell)
         if len(reviewers) == 1:
             report = run_reviewer(reviewers[0], repo, prompt, changed_paths, args.require_finding)
             label = "autoreview"
@@ -2324,6 +2913,8 @@ def main() -> int:
             print_report(report, label=label)
     finally:
         tests_status = finish_parallel_tests(*tests_proc) if tests_proc else 0
+        if reference_workspace:
+            shutil.rmtree(reference_workspace, ignore_errors=True)
 
     has_findings = bool(report["findings"])
     overall_incorrect = report["overall_correctness"] == "patch is incorrect"
