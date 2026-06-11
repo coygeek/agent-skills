@@ -1434,11 +1434,12 @@ def reviewer_args(args: argparse.Namespace) -> list[argparse.Namespace]:
         reviewers = [(args.engine, None, None)]
 
     selected_engines = {engine for engine, _, _ in reviewers}
-    unused_fallback_engines = (set(fallback_by_engine) | set(env_fallback_by_engine)) - selected_engines
+    fallback_engines = set(fallback_by_engine) | set(env_fallback_by_engine)
+    unused_fallback_engines = fallback_engines - selected_engines
     if unused_fallback_engines:
         engine_list = ", ".join(sorted(unused_fallback_engines))
         raise SystemExit(f"--fallback-model specified for unselected reviewer: {engine_list}")
-    selected_non_claude_fallback = sorted(engine for engine in fallback_by_engine if engine != "claude")
+    selected_non_claude_fallback = sorted(engine for engine in fallback_engines if engine != "claude")
     if selected_non_claude_fallback:
         engine_list = ", ".join(selected_non_claude_fallback)
         raise SystemExit(f"--fallback-model is only supported for claude, not {engine_list}")
