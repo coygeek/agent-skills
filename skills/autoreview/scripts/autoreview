@@ -3171,91 +3171,91 @@ def main() -> int:
         return 0
     repo = repo_root()
     references, strict_references, reference_workspace = build_references(args, repo)
-    args.review_references = references
-    args.effective_strict_references = strict_references
-    reviewers = reviewer_args(args)
-    reference_manifest = render_reference_manifest(references, strict_references)
-    target, target_ref = choose_target(repo, args.mode, args.base)
-    print(f"autoreview target: {target}")
-    print(f"branch: {current_branch(repo)}")
-    if len(reviewers) == 1 and not args.reviewers and not args.panel:
-        print(f"engine: {reviewers[0].engine}")
-        if reviewers[0].model:
-            print(f"model: {reviewers[0].model}")
-        if getattr(reviewers[0], "fallback_model", None):
-            print(f"fallback_model: {reviewers[0].fallback_model}")
-        if reviewers[0].thinking:
-            print(f"thinking: {reviewers[0].thinking}")
-    else:
-        print(f"reviewers: {', '.join(reviewer_label(reviewer) for reviewer in reviewers)}")
-    print(f"tools: {'on' if args.tools else 'off'}")
-    print(f"web_search: {'on' if args.web_search else 'off'}")
-    if references:
-        print(f"references: {len(references)}")
-        print(
-            "references_metadata: "
-            + json.dumps(
-                references_metadata(references, strict_references, redact_hidden=not args.dry_run),
-                sort_keys=True,
-            )
-        )
-        print("reference_modes_by_engine: " + json.dumps(references_metadata_by_engine(references, strict_references, reviewers, repo), sort_keys=True))
-    display_ref = args.commit if target == "commit" else target_ref
-    if display_ref:
-        print(f"ref: {display_ref}")
-    if references and strict_references:
-        for reviewer in reviewers:
-            enforce_reference_mode(reviewer, repo)
-    if args.dry_run:
-        if reference_workspace:
-            shutil.rmtree(reference_workspace, ignore_errors=True)
-        return 0
-
-    tests_proc: tuple[subprocess.Popen, float] | None = None
     try:
-        if target == "local":
-            bundle = local_bundle(repo)
-        elif target == "branch":
-            assert target_ref
-            bundle = branch_bundle(repo, target_ref)
+        args.review_references = references
+        args.effective_strict_references = strict_references
+        reviewers = reviewer_args(args)
+        reference_manifest = render_reference_manifest(references, strict_references)
+        target, target_ref = choose_target(repo, args.mode, args.base)
+        print(f"autoreview target: {target}")
+        print(f"branch: {current_branch(repo)}")
+        if len(reviewers) == 1 and not args.reviewers and not args.panel:
+            print(f"engine: {reviewers[0].engine}")
+            if reviewers[0].model:
+                print(f"model: {reviewers[0].model}")
+            if getattr(reviewers[0], "fallback_model", None):
+                print(f"fallback_model: {reviewers[0].fallback_model}")
+            if reviewers[0].thinking:
+                print(f"thinking: {reviewers[0].thinking}")
         else:
-            bundle = commit_bundle(repo, args.commit)
-            target_ref = args.commit
-        prompt = build_prompt(repo, target, target_ref, bundle, load_extra_prompt(args), load_datasets(args), reference_manifest)
-        changed_paths = review_paths(repo, target, target_ref, args.commit)
-        print(f"bundle: {len(prompt)} chars")
+            print(f"reviewers: {', '.join(reviewer_label(reviewer) for reviewer in reviewers)}")
+        print(f"tools: {'on' if args.tools else 'off'}")
+        print(f"web_search: {'on' if args.web_search else 'off'}")
+        if references:
+            print(f"references: {len(references)}")
+            print(
+                "references_metadata: "
+                + json.dumps(
+                    references_metadata(references, strict_references, redact_hidden=not args.dry_run),
+                    sort_keys=True,
+                )
+            )
+            print("reference_modes_by_engine: " + json.dumps(references_metadata_by_engine(references, strict_references, reviewers, repo), sort_keys=True))
+        display_ref = args.commit if target == "commit" else target_ref
+        if display_ref:
+            print(f"ref: {display_ref}")
+        if references and strict_references:
+            for reviewer in reviewers:
+                enforce_reference_mode(reviewer, repo)
+        if args.dry_run:
+            return 0
 
-        if args.parallel_tests:
-            tests_proc = start_parallel_tests(args.parallel_tests, repo, args.parallel_tests_shell)
-        if len(reviewers) == 1:
-            report = run_reviewer(reviewers[0], repo, prompt, changed_paths, args.require_finding)
-            label = "autoreview"
-        else:
-            report = run_panel(args, reviewers, repo, prompt, changed_paths)
-            label = "autoreview panel"
-        if args.json_output:
-            Path(args.json_output).write_text(json.dumps(report, indent=2) + "\n")
+        tests_proc: tuple[subprocess.Popen, float] | None = None
+        try:
+            if target == "local":
+                bundle = local_bundle(repo)
+            elif target == "branch":
+                assert target_ref
+                bundle = branch_bundle(repo, target_ref)
+            else:
+                bundle = commit_bundle(repo, args.commit)
+                target_ref = args.commit
+            prompt = build_prompt(repo, target, target_ref, bundle, load_extra_prompt(args), load_datasets(args), reference_manifest)
+            changed_paths = review_paths(repo, target, target_ref, args.commit)
+            print(f"bundle: {len(prompt)} chars")
 
-        if args.output:
-            original_stdout = sys.stdout
-            with Path(args.output).open("w") as handle:
-                sys.stdout = Tee(original_stdout, handle)
+            if args.parallel_tests:
+                tests_proc = start_parallel_tests(args.parallel_tests, repo, args.parallel_tests_shell)
+            if len(reviewers) == 1:
+                report = run_reviewer(reviewers[0], repo, prompt, changed_paths, args.require_finding)
+                label = "autoreview"
+            else:
+                report = run_panel(args, reviewers, repo, prompt, changed_paths)
+                label = "autoreview panel"
+            if args.json_output:
+                Path(args.json_output).write_text(json.dumps(report, indent=2) + "\n")
+
+            if args.output:
+                original_stdout = sys.stdout
+                with Path(args.output).open("w") as handle:
+                    sys.stdout = Tee(original_stdout, handle)
+                    print_report(report, label=label)
+                    sys.stdout = original_stdout
+            else:
                 print_report(report, label=label)
-                sys.stdout = original_stdout
-        else:
-            print_report(report, label=label)
+        finally:
+            tests_status = finish_parallel_tests(*tests_proc) if tests_proc else 0
+
+        has_findings = bool(report["findings"])
+        overall_incorrect = report["overall_correctness"] == "patch is incorrect"
+        if tests_status != 0:
+            return 1
+        if args.expect_findings:
+            return 0 if has_findings else 1
+        return 1 if has_findings or overall_incorrect else 0
     finally:
-        tests_status = finish_parallel_tests(*tests_proc) if tests_proc else 0
         if reference_workspace:
             shutil.rmtree(reference_workspace, ignore_errors=True)
-
-    has_findings = bool(report["findings"])
-    overall_incorrect = report["overall_correctness"] == "patch is incorrect"
-    if tests_status != 0:
-        return 1
-    if args.expect_findings:
-        return 0 if has_findings else 1
-    return 1 if has_findings or overall_incorrect else 0
 
 
 class Tee:
