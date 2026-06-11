@@ -19,6 +19,10 @@ from typing import Any, Callable
 
 
 ENGINES = ("codex", "claude", "droid", "copilot")
+DEFAULT_MODEL_BY_ENGINE = {
+    "codex": "gpt-5.5",
+    "claude": "claude-fable-5",
+}
 THINKING_LEVELS_BY_ENGINE = {
     "codex": {"none", "minimal", "low", "medium", "high", "xhigh"},
     "claude": {"low", "medium", "high", "xhigh", "max"},
@@ -1305,9 +1309,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base")
     parser.add_argument("--commit", default="HEAD")
     parser.add_argument("--engine", choices=ENGINES, default=os.environ.get("AUTOREVIEW_ENGINE", "codex"))
-    parser.add_argument("--reviewers", help="Comma-separated review panel, e.g. codex,claude or codex:gpt-5:high.")
+    parser.add_argument("--reviewers", help="Comma-separated review panel, e.g. codex,claude or codex:gpt-5.5:high.")
     parser.add_argument("--panel", action="store_true", help="Run a Codex/Claude review panel unless --engine changes the first reviewer.")
-    parser.add_argument("--model", action="append", help="Model for all reviewers or engine=model. Repeatable.")
+    parser.add_argument(
+        "--model",
+        action="append",
+        help="Model for all reviewers or engine=model. Repeatable. Defaults: codex=gpt-5.5, claude=claude-fable-5.",
+    )
     parser.add_argument("--thinking", action="append", help="Thinking/effort for all reviewers or engine=level. Repeatable. Codex: none, minimal, low, medium, high, xhigh. Claude: low, medium, high, xhigh, max. Droid: off, none, low, medium, high.")
     parser.add_argument(
         "--fallback-model",
@@ -1471,6 +1479,7 @@ def reviewer_args(args: argparse.Namespace) -> list[argparse.Namespace]:
             or global_model
             or env_model_by_engine.get(engine)
             or env_global_model
+            or DEFAULT_MODEL_BY_ENGINE.get(engine)
         )
         thinking = (
             inline_thinking
@@ -1611,10 +1620,18 @@ def self_test_config_defaults() -> None:
     keys = [
         "AUTOREVIEW_MODEL",
         "AUTOREVIEW_CODEX_MODEL",
+        "AUTOREVIEW_CLAUDE_MODEL",
         "AUTOREVIEW_THINKING",
         "AUTOREVIEW_CODEX_THINKING",
+        "AUTOREVIEW_CLAUDE_THINKING",
     ]
     with preserve_env(keys):
+        default_codex = reviewer_args(reviewer_test_args(engine="codex"))[0]
+        if default_codex.model != "gpt-5.5":
+            raise SystemExit(f"self-test config defaults failed: default codex model={default_codex.model!r}")
+        default_claude = reviewer_args(reviewer_test_args(engine="claude"))[0]
+        if default_claude.model != "claude-fable-5":
+            raise SystemExit(f"self-test config defaults failed: default claude model={default_claude.model!r}")
         os.environ["AUTOREVIEW_MODEL"] = "env-global-model"
         os.environ["AUTOREVIEW_CODEX_MODEL"] = "env-codex-model"
         os.environ["AUTOREVIEW_THINKING"] = "low"

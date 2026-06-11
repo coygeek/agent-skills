@@ -7,7 +7,7 @@ description: "Run a structured code review (Codex default, Claude optional) as a
 
 Run the bundled structured review helper as a closeout check. This is code review, not Guardian `auto_review` approval routing.
 
-Codex review is the default when no engine is set. It usually delivers the best review results and should remain the normal final closeout engine.
+Codex review is the default when no engine is set. It uses `gpt-5.5` by default, usually delivers the best review results, and should remain the normal final closeout engine. Claude review is optional and uses `claude-fable-5` by default.
 
 Use when:
 
@@ -147,30 +147,39 @@ Run multiple reviewers against one frozen bundle:
 Set reviewer models and thinking/effort explicitly:
 
 ```bash
-"$AUTOREVIEW" --reviewers codex,claude --model codex=gpt-5.1 --thinking codex=high --model claude=sonnet --thinking claude=max
+"$AUTOREVIEW" --reviewers codex,claude --model codex=gpt-5.5 --thinking codex=high --model claude=claude-fable-5 --thinking claude=max
 ```
 
 Inline syntax is also supported for simple model IDs:
 
 ```bash
-"$AUTOREVIEW" --reviewers codex:gpt-5.1:high,claude:sonnet:max
+"$AUTOREVIEW" --reviewers codex:gpt-5.5:high,claude:claude-fable-5:max
 ```
 
 For models with slashes or extra colons, prefer keyed form:
 
 ```bash
 "$AUTOREVIEW" --engine droid --model claude-opus-4-8
-"$AUTOREVIEW" --reviewers codex,droid --model codex=gpt-5.1 --model droid=claude-opus-4-8
+"$AUTOREVIEW" --reviewers codex,droid --model codex=gpt-5.5 --model droid=claude-opus-4-8
 ```
 
 ## Models and thinking
 
 The helper accepts `--model` globally or per engine (`engine=model`) and `--thinking` globally or per engine (`engine=level`). Repeat either flag for multiple reviewers.
 
+Recommended model defaults:
+
+| Engine | Default model | Source note |
+|--------|---------------|-------------|
+| **codex** (default) | `gpt-5.5` | OpenAI's current GPT-5.5 alias |
+| **claude** | `claude-fable-5` | Anthropic's most capable widely released Claude model |
+
+CLI flags and environment variables override these defaults. Droid and Copilot do not get built-in model defaults here because their provider catalogs are external to the Codex/Claude closeout path and may vary by installation.
+
 | Engine | Model flag | Example model IDs | Thinking flag | Accepted levels |
 |--------|------------|-------------------|---------------|-----------------|
-| **codex** (default) | `codex --model X exec ...` | `gpt-5.1`, `o3` | `-c model_reasoning_effort=Y` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh` |
-| **claude** | `claude --model X` | `sonnet`, `opus`, `haiku`, full Anthropic IDs | `--effort Y` | `low`, `medium`, `high`, `xhigh`, `max` |
+| **codex** (default) | `codex --model X exec ...` | `gpt-5.5`, `gpt-5.5-2026-04-23` | `-c model_reasoning_effort=Y` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh` |
+| **claude** | `claude --model X` | `claude-fable-5`, `claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5` | `--effort Y` | `low`, `medium`, `high`, `xhigh`, `max` |
 | **droid** | `droid exec --model X` | `claude-opus-4-8`, Factory model IDs | `-r, --reasoning-effort Y` | `off`, `none`, `low`, `medium`, `high` |
 | **copilot** | `copilot --model X` | `gpt-5.2`, Copilot model aliases | not supported | n/a |
 
@@ -180,11 +189,11 @@ Examples matching current `main` behavior:
 
 ```bash
 # Codex with explicit model and reasoning
-"$AUTOREVIEW" --engine codex --model gpt-5.1 --thinking high
+"$AUTOREVIEW" --engine codex --model gpt-5.5 --thinking high
 
 # Claude Code aliases or full model names, with optional availability fallback
-"$AUTOREVIEW" --engine claude --model sonnet --thinking max
-"$AUTOREVIEW" --engine claude --model opus --fallback-model sonnet,haiku
+"$AUTOREVIEW" --engine claude --model claude-fable-5 --thinking max
+"$AUTOREVIEW" --engine claude --model claude-fable-5 --fallback-model claude-opus-4-8,claude-sonnet-4-6
 
 # Factory Droid with explicit model and reasoning effort
 "$AUTOREVIEW" --engine droid --model claude-opus-4-8 --thinking low
@@ -199,10 +208,10 @@ CLI flags take precedence over environment variables.
 
 | Variable | Purpose |
 |----------|---------|
-| `AUTOREVIEW_MODEL` | Default `--model` for all engines |
+| `AUTOREVIEW_MODEL` | Override the built-in default `--model` for all engines |
 | `AUTOREVIEW_THINKING` | Default `--thinking` for all engines |
 | `AUTOREVIEW_FALLBACK_MODEL` | Default Claude `--fallback-model` chain |
-| `AUTOREVIEW_<ENGINE>_MODEL` | Per-engine model override |
+| `AUTOREVIEW_<ENGINE>_MODEL` | Per-engine model override, for example `AUTOREVIEW_CODEX_MODEL=gpt-5.5` |
 | `AUTOREVIEW_<ENGINE>_THINKING` | Per-engine thinking override |
 | `AUTOREVIEW_CLAUDE_FALLBACK_MODEL` | Claude-only fallback chain |
 
@@ -263,7 +272,7 @@ The helper:
 - supports `--dry-run`, `--parallel-tests`, `--parallel-tests-shell`, `--prompt`, `--prompt-file`, `--dataset`, `--no-tools`, `--no-web-search`, and commit refs
 - supports `--stream-engine-output` or `AUTOREVIEW_STREAM_ENGINE_OUTPUT=1` for live engine text while preserving structured validation; Codex and Claude hide tool/file event details, emit compact activity summaries, and report usage at turn completion
 - supports opt-in review panels with `--panel` / `--reviewers`, plus per-engine `--model`, `--thinking`, and Claude `--fallback-model`
-- honors `AUTOREVIEW_MODEL`, `AUTOREVIEW_THINKING`, `AUTOREVIEW_FALLBACK_MODEL`, and per-engine `AUTOREVIEW_<ENGINE>_MODEL` / `AUTOREVIEW_<ENGINE>_THINKING` environment defaults when CLI flags are omitted
+- uses built-in model defaults `codex=gpt-5.5` and `claude=claude-fable-5`; honors `AUTOREVIEW_MODEL`, `AUTOREVIEW_THINKING`, `AUTOREVIEW_FALLBACK_MODEL`, and per-engine `AUTOREVIEW_<ENGINE>_MODEL` / `AUTOREVIEW_<ENGINE>_THINKING` environment overrides when CLI flags are omitted
 - allows read-only tools and web search by default where the selected CLI supports them; forbids nested review in the prompt; Codex is run through `codex exec` with read-only sandbox, reviewed-repo instruction/config/rule isolation flags, and structured output
 - runs Claude with `--safe-mode` (`v2.1.169+`), `--setting-sources user`, MCP disabled, explicit allowed tools, and `--fallback-model` when set, so reviewed-repo hooks/skills/MCP do not affect the review run while normal auth still works; managed settings policy can still apply
 - runs Droid with `droid exec` in read-only mode, forwards `--model` and `-r, --reasoning-effort`, and switches `--output-format` to `stream-json` when streaming is enabled
