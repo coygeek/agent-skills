@@ -1434,7 +1434,7 @@ def reviewer_args(args: argparse.Namespace) -> list[argparse.Namespace]:
         reviewers = [(args.engine, None, None)]
 
     selected_engines = {engine for engine, _, _ in reviewers}
-    unused_fallback_engines = set(fallback_by_engine) - selected_engines
+    unused_fallback_engines = (set(fallback_by_engine) | set(env_fallback_by_engine)) - selected_engines
     if unused_fallback_engines:
         engine_list = ", ".join(sorted(unused_fallback_engines))
         raise SystemExit(f"--fallback-model specified for unselected reviewer: {engine_list}")
@@ -1698,10 +1698,14 @@ def self_test_fallback_scope() -> None:
                 raise
         os.environ.pop("AUTOREVIEW_FALLBACK_MODEL")
         os.environ["AUTOREVIEW_CLAUDE_FALLBACK_MODEL"] = "env-claude-only"
-        codex_only = reviewer_args(reviewer_test_args(engine="codex"))[0]
-        if codex_only.fallback_model is not None:
-            raise SystemExit("self-test fallback scope failed: Claude fallback env should be ignored without Claude")
+        try:
+            reviewer_args(reviewer_test_args(engine="codex"))
+            raise SystemExit("self-test fallback scope failed: Claude fallback env without Claude should be rejected")
+        except SystemExit as exc:
+            if "unselected reviewer: claude" not in str(exc):
+                raise
         os.environ["AUTOREVIEW_FALLBACK_MODEL"] = "env-global-fallback"
+        os.environ.pop("AUTOREVIEW_CLAUDE_FALLBACK_MODEL")
         os.environ["AUTOREVIEW_CODEX_FALLBACK_MODEL"] = "env-codex-fallback"
         try:
             reviewer_args(reviewer_test_args(engine="codex"))
