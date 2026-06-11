@@ -1474,9 +1474,6 @@ def reviewer_args(args: argparse.Namespace) -> list[argparse.Namespace]:
                 or env_global_fallback
             )
         else:
-            engine_specific_fallback = fallback_by_engine.get(engine) or env_fallback_by_engine.get(engine)
-            if engine_specific_fallback:
-                raise SystemExit(f"--fallback-model is only supported for claude, not {engine}")
             fallback_model = None
         if thinking and thinking not in THINKING_LEVELS_BY_ENGINE[engine]:
             valid = ", ".join(sorted(THINKING_LEVELS_BY_ENGINE[engine])) or "none"
