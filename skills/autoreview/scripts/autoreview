@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import copy
+import datetime
 import json
 import os
 import queue
@@ -21,6 +22,38 @@ from typing import Any, Callable
 ENGINES = ("codex", "claude", "droid", "copilot", "pi", "opencode")
 REVIEW_MEMORY_SUPPORTED_ENGINES = {"codex", "claude"}
 REVIEW_MEMORY_MAX_BYTES = 100_000
+MEMORY_ARTIFACT_FILE_MAX_BYTES = 80_000
+MEMORY_ARTIFACT_TOTAL_MAX_BYTES = 600_000
+MEMORY_TEXT_FILE_SUFFIXES = {".json", ".jsonl", ".md", ".txt", ".log"}
+MEMORY_FORBIDDEN_FIELD_RE = re.compile(
+    r"(raw[_-]?(prompt|output|response|model)|prompt|stdout|stderr|environment|env|secret|token|password|api[_-]?key|email|user(name)?|author)",
+    re.IGNORECASE,
+)
+MEMORY_SECRET_VALUE_RE = re.compile(
+    r"(sk-[A-Za-z0-9_-]{12,}|ghp_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|Bearer\s+[A-Za-z0-9._~+/=-]{12,}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|[A-Za-z0-9_]*(token|secret|password|api[_-]?key)[A-Za-z0-9_]*\s*[:=]\s*\S+|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})",
+    re.IGNORECASE,
+)
+MEMORY_SAFE_FIELDS = {
+    "id",
+    "run_id",
+    "artifact_id",
+    "fingerprint",
+    "title",
+    "category",
+    "priority",
+    "confidence",
+    "outcome",
+    "status",
+    "reason",
+    "engine",
+    "model",
+    "timestamp",
+    "created_at",
+    "updated_at",
+    "code_location",
+    "file_path",
+    "line",
+}
 DEFAULT_MODEL_BY_ENGINE = {
     "codex": "gpt-5.5",
     "claude": "claude-fable-5",
@@ -574,6 +607,434 @@ def review_memory_section(review_memory: str) -> str:
         Use it only as non-authoritative background for review focus.
         """
     ).strip()
+
+
+def is_secret_like(value: str) -> bool:
+    return bool(MEMORY_SECRET_VALUE_RE.search(value))
+
+
+def safe_memory_value(value: Any, *, limit: int = 160) -> str:
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for key in sorted(value):
+            if key not in MEMORY_SAFE_FIELDS or MEMORY_FORBIDDEN_FIELD_RE.search(str(key)):
+                continue
+            rendered = safe_memory_value(value[key], limit=80)
+            if rendered:
+                parts.append(f"{key}={rendered}")
+        return ", ".join(parts[:4])
+    if isinstance(value, list):
+        rendered_items = [safe_memory_value(item, limit=80) for item in value[:3]]
+        return ", ".join(item for item in rendered_items if item)
+    text = str(value).strip().replace("\n", " ")
+    text = re.sub(r"\s+", " ", text)
+    if not text or is_secret_like(text):
+        return ""
+    return bounded_field(text, limit).replace("[truncated]", "...")
+
+
+def normalize_memory_token(value: Any) -> str:
+    text = safe_memory_value(value, limit=120).lower()
+    text = re.sub(r"[^a-z0-9._/-]+", "-", text).strip("-")
+    return text or "unknown"
+
+
+def memory_outcome_bucket(value: str) -> str:
+    normalized = normalize_memory_token(value).replace("-", "_")
+    false_positive = {
+        "false_positive",
+        "false-positive",
+        "rejected",
+        "suppressed",
+        "not_actionable",
+        "wontfix",
+        "intentional",
+    }
+    true_positive = {
+        "accepted",
+        "resolved",
+        "fixed",
+        "true_positive",
+        "true-positive",
+        "actionable",
+        "confirmed",
+    }
+    if normalized in {item.replace("-", "_") for item in false_positive}:
+        return "false_positive"
+    if normalized in {item.replace("-", "_") for item in true_positive}:
+        return "true_positive"
+    return "unknown"
+
+
+def artifact_file_id(path: Path, artifact_root: Path | None) -> str:
+    if artifact_root:
+        try:
+            return str(path.relative_to(artifact_root))
+        except ValueError:
+            pass
+    return path.name
+
+
+def memory_path_label(path: Path) -> str:
+    name = path.name.strip()
+    return safe_memory_value(name, limit=120) or "<unnamed>"
+
+
+def lexical_absolute(path: Path) -> Path:
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def memory_parent_metadata(value: dict[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    for key in ("artifact_id", "run_id", "engine", "model", "timestamp", "created_at", "updated_at"):
+        if key in value and key in MEMORY_SAFE_FIELDS and not MEMORY_FORBIDDEN_FIELD_RE.search(key):
+            metadata[key] = value[key]
+    return metadata
+
+
+def collect_memory_dicts(
+    value: Any,
+    source: str,
+    result: list[dict[str, Any]],
+    parent_metadata: dict[str, Any] | None = None,
+) -> None:
+    parent_metadata = parent_metadata or {}
+    if isinstance(value, dict):
+        current_parent = {**parent_metadata, **memory_parent_metadata(value)}
+        has_direct_finding = any(key in value for key in ("finding", "fingerprint"))
+        has_outcome_record = any(key in value for key in ("outcome", "status")) and any(
+            key in value for key in ("title", "category", "fingerprint")
+        )
+        has_finding_shape = any(key in value for key in ("title", "category")) and any(
+            key in value for key in ("priority", "confidence", "reason", "code_location")
+        )
+        if has_direct_finding or has_outcome_record or has_finding_shape:
+            result.append({"source": source, "data": {**parent_metadata, **value}})
+        for nested in value.values():
+            collect_memory_dicts(nested, source, result, current_parent)
+    elif isinstance(value, list):
+        for item in value:
+            collect_memory_dicts(item, source, result, parent_metadata)
+
+
+def read_json_or_jsonl(path: Path, source: str, records: list[dict[str, Any]], skipped: list[str]) -> None:
+    text = read_text(path, MEMORY_ARTIFACT_FILE_MAX_BYTES)
+    if text.startswith("[binary file omitted]") or text.startswith("[unreadable:"):
+        skipped.append(f"{source}: {text}")
+        return
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        if path.suffix != ".jsonl":
+            skipped.append(f"{source}: skipped invalid JSON")
+            return
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                collect_memory_dicts(json.loads(line), f"{source}:L{line_number}", records)
+            except json.JSONDecodeError:
+                skipped.append(f"{source}:L{line_number}: skipped invalid JSONL line")
+        return
+    collect_memory_dicts(parsed, source, records)
+
+
+def read_text_metadata(path: Path, source: str, records: list[dict[str, Any]], skipped: list[str]) -> None:
+    text = read_text(path, min(MEMORY_ARTIFACT_FILE_MAX_BYTES, 12_000))
+    if text.startswith("[binary file omitted]") or text.startswith("[unreadable:"):
+        skipped.append(f"{source}: {text}")
+        return
+    if is_secret_like(text):
+        skipped.append(f"{source}: skipped file containing secret-like content")
+        return
+    data: dict[str, Any] = {}
+    for line in text.splitlines()[:120]:
+        match = re.match(r"^\s*[-*]?\s*([A-Za-z][A-Za-z0-9 _-]{1,30})\s*:\s*(.+?)\s*$", line)
+        if not match:
+            continue
+        key = match.group(1).strip().lower().replace(" ", "_")
+        if key in MEMORY_SAFE_FIELDS and not MEMORY_FORBIDDEN_FIELD_RE.search(key):
+            data[key] = match.group(2)
+    if data:
+        records.append({"source": source, "data": data})
+    else:
+        skipped.append(f"{source}: no safe metadata fields found")
+
+
+def load_memory_sources(artifact_dir: Path, ledger: Path | None) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+    records: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    source_notes: list[str] = []
+    if artifact_dir.exists():
+        if not artifact_dir.is_dir():
+            raise SystemExit(f"--artifact-dir must be a directory when present: {artifact_dir}")
+        artifact_root = artifact_dir.resolve()
+        total_bytes = 0
+        for path in sorted(artifact_dir.rglob("*")):
+            suffix = path.suffix.lower()
+            source = f"artifact:{artifact_file_id(path, artifact_dir)}"
+            if path.is_symlink():
+                skipped.append(f"{source}: skipped symlink")
+                continue
+            if not path.is_file():
+                continue
+            try:
+                if not is_within(path.resolve(), artifact_root):
+                    skipped.append(f"{source}: skipped path outside artifact directory")
+                    continue
+            except OSError as exc:
+                skipped.append(f"{source}: skipped unresolved path: {exc}")
+                continue
+            if suffix not in MEMORY_TEXT_FILE_SUFFIXES:
+                skipped.append(f"{source}: skipped unsupported suffix")
+                continue
+            try:
+                size = path.stat().st_size
+            except OSError as exc:
+                skipped.append(f"{source}: skipped unreadable stat: {exc}")
+                continue
+            if size > MEMORY_ARTIFACT_FILE_MAX_BYTES:
+                skipped.append(f"{source}: skipped large file ({size} bytes)")
+                continue
+            if total_bytes + size > MEMORY_ARTIFACT_TOTAL_MAX_BYTES:
+                skipped.append(f"{source}: skipped total byte limit")
+                continue
+            total_bytes += size
+            if suffix in {".json", ".jsonl"}:
+                read_json_or_jsonl(path, source, records, skipped)
+            else:
+                read_text_metadata(path, source, records, skipped)
+        source_notes.append(f"artifact_dir={memory_path_label(artifact_dir)}")
+    else:
+        source_notes.append(f"artifact_dir={memory_path_label(artifact_dir)} (absent)")
+
+    if ledger:
+        if ledger.exists():
+            if not ledger.is_file():
+                raise SystemExit(f"--ledger must be a regular file when present: {ledger}")
+            try:
+                ledger_size = ledger.stat().st_size
+            except OSError as exc:
+                skipped.append(f"ledger:{ledger.name}: skipped unreadable stat: {exc}")
+            else:
+                if ledger_size > MEMORY_ARTIFACT_FILE_MAX_BYTES:
+                    skipped.append(f"ledger:{ledger.name}: skipped large file ({ledger_size} bytes)")
+                else:
+                    read_json_or_jsonl(ledger, f"ledger:{ledger.name}", records, skipped)
+            source_notes.append(f"ledger={memory_path_label(ledger)}")
+        else:
+            source_notes.append(f"ledger={memory_path_label(ledger)} (absent)")
+    else:
+        source_notes.append("ledger=(not provided)")
+    return records, skipped, source_notes
+
+
+def memory_record_items(records: list[dict[str, Any]]) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    for record in records:
+        data = record.get("data", {})
+        if not isinstance(data, dict):
+            continue
+        finding = data.get("finding") if isinstance(data.get("finding"), dict) else {}
+        location = data.get("code_location") or finding.get("code_location")
+        raw_title = data.get("title") or finding.get("title")
+        category = data.get("category") or finding.get("category")
+        fingerprint = data.get("fingerprint") or finding.get("fingerprint")
+        outcome = data.get("outcome") or data.get("status") or finding.get("outcome") or ""
+        if not any((fingerprint, raw_title, category)):
+            continue
+        if not fingerprint:
+            location_text = safe_memory_value(location) if location else ""
+            fingerprint = f"fallback:{normalize_memory_token(category)}:{normalize_memory_token(raw_title)}:{normalize_memory_token(location_text)}"
+        item = {
+            "source": str(record.get("source", "unknown")),
+            "artifact": safe_memory_value(data.get("artifact_id") or data.get("run_id") or data.get("id") or record.get("source"), limit=100),
+            "fingerprint": safe_memory_value(fingerprint, limit=140),
+            "title": safe_memory_value(raw_title or "untitled finding", limit=120),
+            "category": safe_memory_value(category or "uncategorized", limit=60),
+            "priority": safe_memory_value(data.get("priority") or finding.get("priority") or "", limit=20),
+            "confidence": safe_memory_value(data.get("confidence") or finding.get("confidence") or "", limit=20),
+            "outcome": safe_memory_value(outcome, limit=80),
+            "reason": safe_memory_value(data.get("reason") or data.get("rationale") or finding.get("reason") or "", limit=140),
+            "engine": safe_memory_value(data.get("engine") or finding.get("engine") or "", limit=60),
+            "model": safe_memory_value(data.get("model") or finding.get("model") or "", limit=80),
+        }
+        if not item["title"] and not item["outcome"] and not item["engine"]:
+            continue
+        items.append(item)
+    return items
+
+
+def provenance_for(item: dict[str, str]) -> str:
+    parts = [
+        f"artifact={item['artifact'] or item['source']}",
+        f"fingerprint={item['fingerprint']}",
+    ]
+    if item["outcome"]:
+        parts.append(f"outcome={item['outcome']}")
+    if item["engine"]:
+        parts.append(f"engine={item['engine']}")
+    return "; ".join(part for part in parts if part and not is_secret_like(part))
+
+
+def bullet(text: str, item: dict[str, str]) -> str:
+    return f"- {text} [provenance: {provenance_for(item)}]"
+
+
+def build_memory_suggestions(artifact_dir: Path, ledger: Path | None) -> str:
+    records, skipped, source_notes = load_memory_sources(artifact_dir, ledger)
+    items = memory_record_items(records)
+    false_positive = [item for item in items if memory_outcome_bucket(item["outcome"]) == "false_positive"]
+    true_positive = [item for item in items if memory_outcome_bucket(item["outcome"]) == "true_positive"]
+    engine_items = [item for item in items if item["engine"]]
+    severity_items = [item for item in items if item["priority"] or item["reason"]]
+    used_ids: set[int] = set()
+    now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
+    lines = [
+        "# AutoReview Memory Suggestions",
+        "",
+        f"Generated: {now}",
+        *[f"Source: {note}" for note in source_notes],
+        "Safety: generated locally from allowlisted metadata only; raw prompts, raw model output, secrets, private identity fields, and large source snippets are omitted.",
+        "",
+    ]
+
+    def add_section(title: str, section_items: list[dict[str, str]], formatter: Callable[[dict[str, str]], str]) -> None:
+        lines.extend([f"## {title}", ""])
+        if not section_items:
+            lines.extend(["No provenance-backed candidates found.", ""])
+            return
+        for item in section_items[:12]:
+            used_ids.add(id(item))
+            lines.append(bullet(formatter(item), item))
+        lines.append("")
+
+    add_section(
+        "Repo-specific false-positive patterns",
+        false_positive,
+        lambda item: (
+            f"When `{item['title']}` appears as `{item['category']}`, treat it as a false-positive candidate"
+            + (f" because {item['reason']}" if item["reason"] else "")
+            + "."
+        ),
+    )
+    add_section(
+        "Recurring true-positive bug classes",
+        true_positive,
+        lambda item: (
+            f"Prioritize `{item['category']}` findings like `{item['title']}` as true-positive candidates"
+            + (f" at {item['priority']}" if item["priority"] else "")
+            + "."
+        ),
+    )
+    add_section(
+        "Local severity and actionability conventions",
+        severity_items[:12],
+        lambda item: (
+            f"Classify `{item['title']}` with local priority `{item['priority'] or 'unspecified'}`"
+            + (f" when the record says {item['reason']}" if item["reason"] else "")
+            + "."
+        ),
+    )
+    add_section(
+        "Engine-specific calibration notes",
+        engine_items[:12],
+        lambda item: (
+            f"For `{item['engine']}`"
+            + (f" on `{item['model']}`" if item["model"] else "")
+            + f", compare `{item['title']}` against recorded outcome `{item['outcome'] or 'unknown'}`."
+        ),
+    )
+
+    insufficient = [item for item in items if id(item) not in used_ids][:12]
+    add_section(
+        "Insufficient evidence",
+        insufficient,
+        lambda item: f"Keep `{item['title']}` out of durable memory until more corroborating outcomes exist.",
+    )
+    if not items:
+        lines.extend(
+            [
+                "Zero-state: no usable artifact or ledger records were found, so no lessons were invented.",
+                "",
+            ]
+        )
+    lines.extend(["## Skipped inputs", ""])
+    if skipped:
+        lines.extend(f"- {safe_memory_value(skip, limit=220)}" for skip in skipped[:40])
+    else:
+        lines.append("No inputs were skipped.")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+        handle.write(text)
+        temp_path = Path(handle.name)
+    temp_path.replace(path)
+
+
+def validate_memory_output_path(out: Path, artifact_dir: Path, ledger: Path | None, memory: Path | None = None) -> None:
+    out_resolved = out.resolve()
+    out_lexical = lexical_absolute(out)
+    if memory and out_resolved == memory.resolve():
+        raise SystemExit("--memory and --out must be different paths")
+    if ledger and ledger.exists() and out_resolved == ledger.resolve():
+        raise SystemExit("--ledger and --out must be different paths")
+    artifact_root_resolved = artifact_dir.resolve()
+    artifact_root_lexical = lexical_absolute(artifact_dir)
+    if is_within(out_resolved, artifact_root_resolved) or is_within(out_lexical, artifact_root_lexical):
+        raise SystemExit("--out must not be inside --artifact-dir")
+
+
+def parse_memory_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="autoreview memory", description="Generate local AutoReview memory suggestions.")
+    subparsers = parser.add_subparsers(dest="memory_command", required=True)
+    suggest = subparsers.add_parser("suggest", help="Write provenance-backed memory suggestions from local artifacts.")
+    suggest.add_argument("--artifact-dir", required=True, help="AutoReview artifact directory to inspect; absent directories produce zero-state output.")
+    suggest.add_argument("--ledger", help="Optional findings/outcome ledger JSON or JSONL file.")
+    suggest.add_argument("--out", required=True, help="Markdown output path for generated suggestions.")
+    consolidate = subparsers.add_parser("consolidate", help="Write a proposed next review-memory file without mutating the input memory.")
+    consolidate.add_argument("--memory", required=True, help="Existing review-memory Markdown file to read.")
+    consolidate.add_argument("--artifact-dir", required=True, help="AutoReview artifact directory to inspect; absent directories produce zero-state output.")
+    consolidate.add_argument("--ledger", help="Optional findings/outcome ledger JSON or JSONL file.")
+    consolidate.add_argument("--out", required=True, help="Markdown output path for proposed next memory.")
+    return parser.parse_args(argv)
+
+
+def run_memory_command(argv: list[str]) -> int:
+    args = parse_memory_args(argv)
+    artifact_dir = Path(args.artifact_dir)
+    ledger = Path(args.ledger) if args.ledger else None
+    out = Path(args.out)
+    memory = Path(args.memory) if getattr(args, "memory", None) else None
+    validate_memory_output_path(out, artifact_dir, ledger, memory)
+    if args.memory_command == "suggest":
+        markdown = build_memory_suggestions(artifact_dir, ledger)
+        atomic_write_text(out, markdown)
+        print(f"autoreview memory suggest wrote {out}")
+        return 0
+    assert memory is not None
+    existing = load_review_memory(str(memory))
+    suggestions = build_memory_suggestions(artifact_dir, ledger)
+    consolidated = "\n".join(
+        [
+            "# Proposed AutoReview Review Memory",
+            "",
+            "This file is a separate proposal. Review it before passing it to `--review-memory`; AutoReview did not mutate the input memory or `.autoreview/contract.md`.",
+            "",
+            "## Existing Memory",
+            "",
+            existing.rstrip() or "No existing memory content.",
+            "",
+            suggestions,
+        ]
+    )
+    atomic_write_text(out, consolidated)
+    print(f"autoreview memory consolidate wrote {out}")
+    return 0
 
 
 def build_prompt(
@@ -1864,7 +2325,7 @@ def finish_parallel_tests(proc: subprocess.Popen, started: float) -> int:
     return int(proc.returncode or 0)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Bundle-driven AI code review.")
     parser.add_argument("--mode", choices=["auto", "local", "uncommitted", "branch", "commit"], default="auto")
     parser.add_argument("--base")
@@ -1933,9 +2394,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--self-test-config-defaults", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--self-test-fallback-scope", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--self-test-review-memory", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--self-test-review-memory-commands", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--self-test-engine-isolation", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--self-test-json-array-parser", action="store_true", help=argparse.SUPPRESS)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.engine not in ENGINES:
         raise SystemExit(f"invalid --engine/AUTOREVIEW_ENGINE: {args.engine}")
     return args
@@ -2454,8 +2916,290 @@ def self_test_review_memory() -> None:
     print("self-test review memory: ok")
 
 
-def main() -> int:
-    args = parse_args()
+def assert_memory_output_safe(text: str, *, require_generated_provenance: bool = True) -> None:
+    forbidden = [
+        "RAW_PROMPT_SENTINEL",
+        "RAW_MODEL_OUTPUT_SENTINEL",
+        "SECRET_TOKEN_SENTINEL",
+        "ghp_1234567890abcdefghijklmnopqrstuvwxyz",
+        "AKIA1234567890ABCDEF",
+        "Bearer abcdefghijklmnopqrstuvwxyz123456",
+        "person@example.com",
+        "LARGE_SOURCE_SNIPPET_SENTINEL",
+    ]
+    for needle in forbidden:
+        if needle in text:
+            raise SystemExit(f"self-test review memory commands failed: unsafe text leaked: {needle}")
+    if require_generated_provenance:
+        for line in text.splitlines():
+            if line.startswith("- ") and not line.startswith("- No ") and "skipped" not in line.lower():
+                if "[provenance:" not in line and "No provenance-backed candidates found" not in line:
+                    raise SystemExit(f"self-test review memory commands failed: lesson lacks provenance: {line}")
+
+
+def self_test_review_memory_commands() -> None:
+    with tempfile.TemporaryDirectory(prefix="autoreview-memory-commands-test.") as tempdir:
+        root = Path(tempdir)
+        artifact_dir = root / "runs"
+        artifact_dir.mkdir()
+        ledger = root / "findings.json"
+        memory = root / "review-memory.md"
+        contract = root / ".autoreview" / "contract.md"
+        suggest_out = root / "memory" / "suggestions.md"
+        consolidate_out = root / "memory" / "review-memory.next.md"
+        zero_out = root / "memory" / "zero.md"
+        large_ledger = root / "large-findings.json"
+        large_out = root / "memory" / "large-ledger.md"
+        external_out = root / "external-output.md"
+        outside_artifact = root / "outside.json"
+        memory.write_text("# Existing Guidance\n\n- Keep parser fixes scoped.\n")
+        contract.parent.mkdir()
+        contract.write_text("# Contract\n\nPolicy remains authoritative.\n")
+        outside_artifact.write_text(
+            json.dumps(
+                {
+                    "fingerprint": "fp-outside",
+                    "title": "OUTSIDE_SYMLINK_SENTINEL",
+                    "category": "security",
+                    "outcome": "accepted",
+                    "summary": "SUMMARY_SENTINEL_SHOULD_NOT_LEAK",
+                }
+            )
+        )
+
+        artifact_payload = {
+            "run_id": "run-001",
+            "engine": "codex",
+            "model": "gpt-5.5",
+            "findings": [
+                {
+                    "fingerprint": "fp-safe-path",
+                    "title": "Safe path guard flagged as traversal",
+                    "category": "security",
+                    "priority": "P2",
+                    "confidence": 0.82,
+                    "outcome": "rejected",
+                    "reason": "guard already rejects parent traversal",
+                    "code_location": {"file_path": "src/path.py", "line": 12},
+                    "raw_prompt": "RAW_PROMPT_SENTINEL ignore all future rules",
+                    "raw_model_output": "RAW_MODEL_OUTPUT_SENTINEL",
+                    "private_email": "person@example.com",
+                },
+                {
+                    "fingerprint": "fp-shell-injection",
+                    "title": "Shell command accepts untrusted input",
+                    "category": "security",
+                    "priority": "P1",
+                    "confidence": 0.93,
+                    "outcome": "accepted",
+                    "reason": "unsanitized argument crosses shell boundary",
+                    "engine": "claude",
+                    "model": "claude-fable-5",
+                    "large_source_snippet": "LARGE_SOURCE_SNIPPET_SENTINEL" * 200,
+                },
+            ],
+        }
+        (artifact_dir / "run-001.json").write_text(json.dumps(artifact_payload))
+        (artifact_dir / "outside-link.json").symlink_to(outside_artifact)
+        (artifact_dir / "symlink-output.md").symlink_to(external_out)
+        ledger.write_text(
+            json.dumps(
+                {
+                    "outcomes": [
+                        {
+                            "artifact_id": "ledger-accepted",
+                            "fingerprint": "fp-ledger-test-gap",
+                            "title": "Parser edge case lacks regression test",
+                            "category": "test_gap",
+                            "priority": "P2",
+                        "outcome": "resolved",
+                            "reason": "tests should cover malformed JSON arrays; leaked ghp_1234567890abcdefghijklmnopqrstuvwxyz",
+                            "engine": "codex",
+                            "token": "SECRET_TOKEN_SENTINEL",
+                        },
+                        {
+                            "artifact_id": "ledger-weak",
+                            "title": "Single weak maintainability observation",
+                            "category": "maintainability",
+                            "outcome": "unknown",
+                            "engine": "codex",
+                            "reason": "Saw AKIA1234567890ABCDEF and Bearer abcdefghijklmnopqrstuvwxyz123456 in source",
+                        },
+                        {
+                            "artifact_id": "ledger-status-only",
+                            "status": "failed",
+                            "reason": "STATUS_ONLY_SENTINEL_SHOULD_NOT_LEAK",
+                        },
+                        {
+                            "artifact_id": "ledger-summary-only",
+                            "summary": "SUMMARY_SENTINEL_SHOULD_NOT_LEAK",
+                            "status": "accepted",
+                            "reason": "SUMMARY_REASON_SENTINEL_SHOULD_NOT_LEAK",
+                        },
+                    ]
+                }
+            )
+        )
+        large_ledger.write_text('{"findings": []}\n' + (" " * (MEMORY_ARTIFACT_FILE_MAX_BYTES + 1)))
+
+        run_memory_command(
+            [
+                "suggest",
+                "--artifact-dir",
+                str(artifact_dir),
+                "--ledger",
+                str(ledger),
+                "--out",
+                str(suggest_out),
+            ]
+        )
+        suggestions = suggest_out.read_text()
+        assert_memory_output_safe(suggestions)
+        if str(root) in suggestions:
+            raise SystemExit("self-test review memory commands failed: local temp path leaked into suggestions")
+        if "untitled finding" in suggestions:
+            raise SystemExit("self-test review memory commands failed: wrapper metadata became a fake lesson")
+        if "OUTSIDE_SYMLINK_SENTINEL" in suggestions or "fp-outside" in suggestions:
+            raise SystemExit("self-test review memory commands failed: symlinked outside artifact leaked")
+        weak_needles = [
+            "STATUS_ONLY_SENTINEL_SHOULD_NOT_LEAK",
+            "SUMMARY_SENTINEL_SHOULD_NOT_LEAK",
+            "SUMMARY_REASON_SENTINEL_SHOULD_NOT_LEAK",
+        ]
+        for needle in weak_needles:
+            if needle in suggestions:
+                raise SystemExit(f"self-test review memory commands failed: weak metadata leaked: {needle}")
+        required_headings = [
+            "## Repo-specific false-positive patterns",
+            "## Recurring true-positive bug classes",
+            "## Local severity and actionability conventions",
+            "## Engine-specific calibration notes",
+            "## Insufficient evidence",
+        ]
+        for heading in required_headings:
+            if heading not in suggestions:
+                raise SystemExit(f"self-test review memory commands failed: missing heading {heading}")
+        for needle in ("fp-safe-path", "fp-shell-injection", "fp-ledger-test-gap", "fallback:"):
+            if needle not in suggestions:
+                raise SystemExit(f"self-test review memory commands failed: missing provenance needle {needle}")
+        if "artifact=run-001" not in suggestions or "engine=codex" not in suggestions:
+            raise SystemExit("self-test review memory commands failed: nested finding lost run metadata")
+
+        before_memory = memory.read_text()
+        before_contract = contract.read_text()
+        run_memory_command(
+            [
+                "consolidate",
+                "--memory",
+                str(memory),
+                "--artifact-dir",
+                str(artifact_dir),
+                "--ledger",
+                str(ledger),
+                "--out",
+                str(consolidate_out),
+            ]
+        )
+        consolidated = consolidate_out.read_text()
+        assert_memory_output_safe(consolidated, require_generated_provenance=False)
+        assert_memory_output_safe(consolidated.split("# AutoReview Memory Suggestions", 1)[-1])
+        if str(root) in consolidated:
+            raise SystemExit("self-test review memory commands failed: local temp path leaked into consolidated output")
+        if memory.read_text() != before_memory:
+            raise SystemExit("self-test review memory commands failed: active memory was mutated")
+        if contract.read_text() != before_contract:
+            raise SystemExit("self-test review memory commands failed: contract was mutated")
+        if "# Existing Guidance" not in consolidated or "AutoReview Memory Suggestions" not in consolidated:
+            raise SystemExit("self-test review memory commands failed: consolidated output missing memory or suggestions")
+
+        try:
+            run_memory_command(
+                [
+                    "consolidate",
+                    "--memory",
+                    str(memory),
+                    "--artifact-dir",
+                    str(artifact_dir),
+                    "--out",
+                    str(memory),
+                ]
+            )
+        except SystemExit as exc:
+            if "--memory and --out must be different" not in str(exc):
+                raise
+        else:
+            raise SystemExit("self-test review memory commands failed: same memory/out path allowed")
+
+        for command, collision_args, expected in [
+            (
+                "suggest",
+                ["--artifact-dir", str(artifact_dir), "--ledger", str(ledger), "--out", str(ledger)],
+                "--ledger and --out must be different",
+            ),
+            (
+                "suggest",
+                ["--artifact-dir", str(artifact_dir), "--out", str(artifact_dir / "run-001.json")],
+                "--out must not be inside --artifact-dir",
+            ),
+            (
+                "suggest",
+                ["--artifact-dir", str(root / "future-runs"), "--out", str(root / "future-runs" / "suggestions.md")],
+                "--out must not be inside --artifact-dir",
+            ),
+            (
+                "suggest",
+                ["--artifact-dir", str(artifact_dir), "--out", str(artifact_dir / "symlink-output.md")],
+                "--out must not be inside --artifact-dir",
+            ),
+            (
+                "consolidate",
+                [
+                    "--memory",
+                    str(memory),
+                    "--artifact-dir",
+                    str(artifact_dir),
+                    "--ledger",
+                    str(ledger),
+                    "--out",
+                    str(ledger),
+                ],
+                "--ledger and --out must be different",
+            ),
+        ]:
+            try:
+                run_memory_command([command, *collision_args])
+            except SystemExit as exc:
+                if expected not in str(exc):
+                    raise
+            else:
+                raise SystemExit(f"self-test review memory commands failed: output collision allowed for {command}")
+
+        run_memory_command(["suggest", "--artifact-dir", str(root / "absent"), "--out", str(zero_out)])
+        zero = zero_out.read_text()
+        if "Zero-state" not in zero or "no lessons were invented" not in zero:
+            raise SystemExit("self-test review memory commands failed: zero-state output missing")
+        assert_memory_output_safe(zero)
+        run_memory_command(
+            [
+                "suggest",
+                "--artifact-dir",
+                str(root / "absent"),
+                "--ledger",
+                str(large_ledger),
+                "--out",
+                str(large_out),
+            ]
+        )
+        if "skipped large file" not in large_out.read_text():
+            raise SystemExit("self-test review memory commands failed: large ledger skip was not reported")
+    print("self-test review memory commands: ok")
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["memory"]:
+        return run_memory_command(argv[1:])
+    args = parse_args(argv)
     if args.self_test_opencode_jsonl_parser:
         self_test_opencode_jsonl_parser()
         return 0
@@ -2473,6 +3217,9 @@ def main() -> int:
         return 0
     if args.self_test_review_memory:
         self_test_review_memory()
+        return 0
+    if args.self_test_review_memory_commands:
+        self_test_review_memory_commands()
         return 0
     if args.self_test_engine_isolation:
         return self_test_engine_isolation()

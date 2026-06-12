@@ -126,9 +126,57 @@ V1 review memory is supported only for Codex and Claude reviewers. Direct
 `--engine pi`, `--engine droid`, `--engine copilot`, `--engine opencode`, and
 mixed panels such as `--reviewers codex,pi` fail clearly when `--review-memory`
 is present. Plain `--panel` works because it selects Codex and Claude. Existing
-Codex and Claude isolation flags remain active; `autoreview memory suggest` and
-`autoreview memory consolidate` are planned follow-up commands, not part of this
-option.
+Codex and Claude isolation flags remain active.
+
+### Review Memory Workflow
+
+Generate candidate lessons from local AutoReview-owned artifacts and outcome
+ledgers with the memory subcommands:
+
+```bash
+"$AUTOREVIEW" memory suggest \
+  --artifact-dir .autoreview/runs \
+  --ledger .autoreview/findings.json \
+  --out .autoreview/memory/suggestions.md
+```
+
+Then combine reviewed candidates with an existing memory file into a separate
+proposal:
+
+```bash
+"$AUTOREVIEW" memory consolidate \
+  --memory .autoreview/memory/review-memory.md \
+  --artifact-dir .autoreview/runs \
+  --ledger .autoreview/findings.json \
+  --out .autoreview/memory/review-memory.next.md
+```
+
+`memory suggest` and `memory consolidate` are deterministic local file
+operations. They do not call hosted memory APIs, OpenAI Agents SDK memory,
+Claude Managed Agents memory stores, Claude Dreams, or model-backed synthesis.
+They tolerate missing artifact directories or ledgers and write a clear
+zero-state Markdown file instead of inventing lessons.
+
+The commands read bounded JSON, JSONL, Markdown, text, and log files under the
+provided artifact directory plus the optional ledger. They extract only compact
+metadata such as artifact/run IDs, finding fingerprints, title, category,
+priority, confidence, outcome/status, reason, engine, model, timestamp, and
+code location. Generated lessons are grouped under stable headings for
+repo-specific false-positive patterns, recurring true-positive bug classes,
+local severity/actionability conventions, engine-specific calibration notes,
+and insufficient evidence.
+
+Every lesson must carry provenance: an artifact/run reference, finding
+fingerprint, outcome record, engine/model note, or fallback metadata reference.
+Weak or single-source observations belong under `Insufficient evidence` until a
+human decides they are durable enough for future review memory.
+
+Generated memory must not contain secrets, full raw prompts, full raw model
+outputs, private identity details, process environments, or large copied source
+snippets. Treat these files as human-reviewable drafts, not policy.
+`.autoreview/contract.md` remains the authoritative review contract, and
+`memory consolidate` writes only the `--out` proposal. It never mutates the
+input `--memory` file or `.autoreview/contract.md`.
 
 If an open PR exists, use its actual base:
 
