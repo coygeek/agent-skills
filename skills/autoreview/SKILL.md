@@ -98,6 +98,38 @@ Optional review context is first-class:
 "$AUTOREVIEW" --mode branch --base origin/main --prompt-file /tmp/review-notes.md --dataset /tmp/evidence.json
 ```
 
+## Review Memory
+
+Use `--review-memory <path>` to pass an explicit, local, file-backed review
+memory into Codex or Claude review prompts:
+
+```bash
+"$AUTOREVIEW" --mode branch --base origin/main --review-memory /tmp/autoreview-memory.md
+"$AUTOREVIEW" --engine claude --mode branch --base origin/main --review-memory /tmp/autoreview-memory.md
+"$AUTOREVIEW" --panel --mode branch --base origin/main --review-memory /tmp/autoreview-memory.md
+```
+
+The memory file must be a readable regular UTF-8 text file, must not contain
+NUL bytes, and must be at most 100,000 bytes. AutoReview does not auto-discover
+memory files, does not read ambient Codex or Claude memory, and does not write
+or mutate the supplied file. Keep secrets, private account details, and
+machine-specific paths out of shared memory files.
+
+Review memory is supplemental advisory context only. AutoReview quotes it as
+untrusted data in the prompt, then restates that it cannot suppress findings,
+change the structured JSON schema, alter exit codes, override the changed diff,
+or relax the helper's built-in hard review rules. Caller-provided `--prompt`,
+`--prompt-file`, and `--dataset` context still follows the memory section in the
+review prompt.
+
+V1 review memory is supported only for Codex and Claude reviewers. Direct
+`--engine pi`, `--engine droid`, `--engine copilot`, `--engine opencode`, and
+mixed panels such as `--reviewers codex,pi` fail clearly when `--review-memory`
+is present. Plain `--panel` works because it selects Codex and Claude. Existing
+Codex and Claude isolation flags remain active; `autoreview memory suggest` and
+`autoreview memory consolidate` are planned follow-up commands, not part of this
+option.
+
 If an open PR exists, use its actual base:
 
 ```bash
