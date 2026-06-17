@@ -87,6 +87,8 @@ DEFAULT_MODEL_BY_ENGINE = {
     "codex": "gpt-5.5",
     "claude": "claude-fable-5",
 }
+DEFAULT_FAST_THINKING = "low"
+FAST_STRATEGIES = ("auto", "service-tier", "thinking-only")
 THINKING_LEVELS_BY_ENGINE = {
     "codex": {"none", "minimal", "low", "medium", "high", "xhigh"},
     "claude": {"low", "medium", "high", "xhigh", "max"},
@@ -2492,6 +2494,35 @@ def parse_args() -> argparse.Namespace:
         action="append",
         help="Claude fallback model chain for all reviewers or claude=a,b. Repeatable.",
     )
+    fast_group = parser.add_mutually_exclusive_group()
+    fast_group.add_argument(
+        "--fast",
+        dest="fast",
+        action="store_true",
+        default=None,
+        help="Enable the AutoReview fast profile. AUTOREVIEW_FAST=1 also enables it.",
+    )
+    fast_group.add_argument(
+        "--no-fast",
+        dest="fast",
+        action="store_false",
+        help="Disable the AutoReview fast profile even when AUTOREVIEW_FAST=1 is set.",
+    )
+    parser.add_argument(
+        "--fast-thinking",
+        action="append",
+        help="Fast-profile thinking/effort for all supported reviewers or engine=level. Repeatable.",
+    )
+    parser.add_argument(
+        "--fast-model",
+        action="append",
+        help="Fast-profile model for all reviewers or engine=model. Repeatable.",
+    )
+    parser.add_argument(
+        "--fast-strategy",
+        choices=FAST_STRATEGIES,
+        help="Fast-profile provider intent. auto requests provider fast behavior when available, service-tier requests provider-native fast intent, thinking-only only lowers model thinking.",
+    )
     parser.add_argument("--allow-partial-panel", action="store_true", help="Continue panel output when one reviewer fails.")
     parser.add_argument("--codex-bin", default=os.environ.get("CODEX_BIN", "codex"))
     parser.add_argument("--claude-bin", default=os.environ.get("CLAUDE_BIN", "claude"))
@@ -2534,6 +2565,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--self-test-config-defaults", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--self-test-fallback-scope", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--self-test-fast-profile", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--self-test-engine-isolation", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--self-test-json-array-parser", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--self-test-heartbeat-metrics", action="store_true", help=argparse.SUPPRESS)
@@ -2573,6 +2605,18 @@ def env_defaults_for(env_suffix: str) -> tuple[str | None, dict[str, str]]:
         if value:
             per_engine[engine] = value
     return global_value, per_engine
+
+
+def env_bool(name: str) -> bool | None:
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off", ""}:
+        return False
+    raise SystemExit(f"invalid {name}: expected 1/0, true/false, yes/no, or on/off")
 
 
 def parse_keyed_options(values: list[str] | None, option: str) -> tuple[str | None, dict[str, str]]:
@@ -2616,9 +2660,18 @@ def reviewer_args(args: argparse.Namespace) -> list[argparse.Namespace]:
     global_model, model_by_engine = parse_keyed_options(args.model, "model")
     global_thinking, thinking_by_engine = parse_keyed_options(args.thinking, "thinking")
     global_fallback, fallback_by_engine = parse_keyed_options(args.fallback_model, "fallback-model")
+    fast_model_global, fast_model_by_engine = parse_keyed_options(args.fast_model, "fast-model")
+    fast_thinking_global, fast_thinking_by_engine = parse_keyed_options(args.fast_thinking, "fast-thinking")
     env_global_model, env_model_by_engine = env_defaults_for("model")
     env_global_thinking, env_thinking_by_engine = env_defaults_for("thinking")
     env_global_fallback, env_fallback_by_engine = env_defaults_for("fallback-model")
+    env_global_fast_model, env_fast_model_by_engine = env_defaults_for("fast-model")
+    env_global_fast_thinking, env_fast_thinking_by_engine = env_defaults_for("fast-thinking")
+    env_fast = env_bool("AUTOREVIEW_FAST")
+    fast_enabled = bool(args.fast if args.fast is not None else env_fast)
+    fast_strategy = args.fast_strategy or os.environ.get("AUTOREVIEW_FAST_STRATEGY", "auto").strip() or "auto"
+    if fast_strategy not in FAST_STRATEGIES:
+        raise SystemExit(f"invalid --fast-strategy/AUTOREVIEW_FAST_STRATEGY: {fast_strategy}")
     reviewers: list[tuple[str, str | None, str | None]] = []
     if args.reviewers:
         tokens = [token.strip() for token in args.reviewers.split(",") if token.strip()]
@@ -2653,21 +2706,82 @@ def reviewer_args(args: argparse.Namespace) -> list[argparse.Namespace]:
         if engine in seen:
             raise SystemExit(f"reviewer specified more than once: {engine}")
         seen.add(engine)
+        if fast_enabled and engine in fast_thinking_by_engine and not THINKING_LEVELS_BY_ENGINE[engine]:
+            raise SystemExit(f"--fast-thinking is not supported for {engine}")
+        if fast_enabled and engine in env_fast_thinking_by_engine and not THINKING_LEVELS_BY_ENGINE[engine]:
+            raise SystemExit(f"AUTOREVIEW_{engine.upper()}_FAST_THINKING is not supported for {engine}")
         model = (
             inline_model
             or model_by_engine.get(engine)
             or global_model
             or env_model_by_engine.get(engine)
             or env_global_model
+            or (fast_enabled and fast_model_by_engine.get(engine))
+            or (fast_enabled and fast_model_global)
+            or (fast_enabled and env_fast_model_by_engine.get(engine))
+            or (fast_enabled and env_global_fast_model)
             or DEFAULT_MODEL_BY_ENGINE.get(engine)
         )
+        model_source = "none"
+        if inline_model:
+            model_source = "inline"
+        elif model_by_engine.get(engine):
+            model_source = "cli-engine"
+        elif global_model:
+            model_source = "cli-global"
+        elif env_model_by_engine.get(engine):
+            model_source = "env-engine"
+        elif env_global_model:
+            model_source = "env-global"
+        elif fast_enabled and fast_model_by_engine.get(engine):
+            model_source = "fast-cli-engine"
+        elif fast_enabled and fast_model_global:
+            model_source = "fast-cli-global"
+        elif fast_enabled and env_fast_model_by_engine.get(engine):
+            model_source = "fast-env-engine"
+        elif fast_enabled and env_global_fast_model:
+            model_source = "fast-env-global"
+        elif DEFAULT_MODEL_BY_ENGINE.get(engine):
+            model_source = "built-in"
         thinking = (
             inline_thinking
             or thinking_by_engine.get(engine)
             or global_thinking
             or env_thinking_by_engine.get(engine)
             or env_global_thinking
+            or ((
+                    fast_thinking_by_engine.get(engine)
+                    or fast_thinking_global
+                    or env_fast_thinking_by_engine.get(engine)
+                    or env_global_fast_thinking
+                    or DEFAULT_FAST_THINKING
+                )
+                if fast_enabled and THINKING_LEVELS_BY_ENGINE[engine]
+                else None
+            )
         )
+        thinking_source = "none"
+        if inline_thinking:
+            thinking_source = "inline"
+        elif thinking_by_engine.get(engine):
+            thinking_source = "cli-engine"
+        elif global_thinking:
+            thinking_source = "cli-global"
+        elif env_thinking_by_engine.get(engine):
+            thinking_source = "env-engine"
+        elif env_global_thinking:
+            thinking_source = "env-global"
+        elif fast_enabled and THINKING_LEVELS_BY_ENGINE[engine]:
+            if fast_thinking_by_engine.get(engine):
+                thinking_source = "fast-cli-engine"
+            elif fast_thinking_global:
+                thinking_source = "fast-cli-global"
+            elif env_fast_thinking_by_engine.get(engine):
+                thinking_source = "fast-env-engine"
+            elif env_global_fast_thinking:
+                thinking_source = "fast-env-global"
+            else:
+                thinking_source = "fast-default"
         if engine == "claude":
             fallback_model = (
                 fallback_by_engine.get(engine)
@@ -2685,6 +2799,13 @@ def reviewer_args(args: argparse.Namespace) -> list[argparse.Namespace]:
         clone.model = model
         clone.thinking = thinking
         clone.fallback_model = fallback_model
+        clone.fast_enabled = fast_enabled
+        clone.fast_strategy = fast_strategy
+        clone.fast_model_source = model_source if model_source.startswith("fast-") else None
+        clone.fast_thinking_source = thinking_source if thinking_source.startswith("fast-") else None
+        clone.model_source = model_source
+        clone.thinking_source = thinking_source
+        clone.provider_fast_requested = fast_enabled and fast_strategy in {"auto", "service-tier"}
         result.append(clone)
     return result
 
@@ -2697,6 +2818,16 @@ def reviewer_label(args: argparse.Namespace) -> str:
         parts.append(f"fallback={args.fallback_model}")
     if args.thinking:
         parts.append(f"thinking={args.thinking}")
+    if getattr(args, "fast_enabled", False):
+        fast_parts = [f"strategy={args.fast_strategy}"]
+        if getattr(args, "fast_model_source", None):
+            fast_parts.append(f"model={args.fast_model_source}")
+        if getattr(args, "fast_thinking_source", None):
+            fast_parts.append(f"thinking={args.fast_thinking_source}")
+        fast_parts.append(
+            f"provider-fast={'requested' if getattr(args, 'provider_fast_requested', False) else 'off'}"
+        )
+        parts.append(f"fast({', '.join(fast_parts)})")
     return " ".join(parts)
 
 
@@ -2772,6 +2903,10 @@ def reviewer_test_args(**overrides: Any) -> argparse.Namespace:
         "model": None,
         "thinking": None,
         "fallback_model": None,
+        "fast": None,
+        "fast_model": None,
+        "fast_thinking": None,
+        "fast_strategy": None,
     }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -2930,6 +3065,102 @@ def self_test_fallback_scope() -> None:
     print("self-test fallback scope: ok")
 
 
+def self_test_fast_profile() -> None:
+    keys = [
+        "AUTOREVIEW_FAST",
+        "AUTOREVIEW_FAST_MODEL",
+        "AUTOREVIEW_CODEX_FAST_MODEL",
+        "AUTOREVIEW_CLAUDE_FAST_MODEL",
+        "AUTOREVIEW_FAST_THINKING",
+        "AUTOREVIEW_CODEX_FAST_THINKING",
+        "AUTOREVIEW_COPILOT_FAST_THINKING",
+        "AUTOREVIEW_FAST_STRATEGY",
+        "AUTOREVIEW_MODEL",
+        "AUTOREVIEW_CODEX_MODEL",
+        "AUTOREVIEW_THINKING",
+        "AUTOREVIEW_CODEX_THINKING",
+    ]
+    with preserve_env(keys):
+        normal = reviewer_args(reviewer_test_args(engine="codex"))[0]
+        if normal.fast_enabled or normal.thinking is not None:
+            raise SystemExit("self-test fast profile failed: normal codex should not be fast")
+
+        fast = reviewer_args(reviewer_test_args(engine="codex", fast=True))[0]
+        if not fast.fast_enabled or fast.fast_strategy != "auto":
+            raise SystemExit("self-test fast profile failed: --fast did not enable auto strategy")
+        if fast.model != "gpt-5.5" or fast.model_source != "built-in":
+            raise SystemExit(f"self-test fast profile failed: fast model={fast.model!r}")
+        if fast.thinking != DEFAULT_FAST_THINKING or fast.fast_thinking_source != "fast-default":
+            raise SystemExit(f"self-test fast profile failed: fast thinking={fast.thinking!r}")
+        if not fast.provider_fast_requested:
+            raise SystemExit("self-test fast profile failed: provider fast should be requested by auto")
+
+        os.environ["AUTOREVIEW_FAST"] = "1"
+        os.environ["AUTOREVIEW_CODEX_FAST_MODEL"] = "env-fast-codex"
+        os.environ["AUTOREVIEW_FAST_THINKING"] = "medium"
+        env_fast = reviewer_args(reviewer_test_args(engine="codex"))[0]
+        if env_fast.model != "env-fast-codex" or env_fast.fast_model_source != "fast-env-engine":
+            raise SystemExit("self-test fast profile failed: env fast model did not apply")
+        if env_fast.thinking != "medium" or env_fast.fast_thinking_source != "fast-env-global":
+            raise SystemExit("self-test fast profile failed: env fast thinking did not apply")
+
+        no_fast = reviewer_args(reviewer_test_args(engine="codex", fast=False))[0]
+        if no_fast.fast_enabled or no_fast.model != "gpt-5.5" or no_fast.thinking is not None:
+            raise SystemExit("self-test fast profile failed: --no-fast did not override env fast")
+
+        os.environ["AUTOREVIEW_CODEX_MODEL"] = "env-codex"
+        os.environ["AUTOREVIEW_CODEX_THINKING"] = "high"
+        env_normal = reviewer_args(reviewer_test_args(engine="codex"))[0]
+        if env_normal.model != "env-codex" or env_normal.thinking != "high":
+            raise SystemExit("self-test fast profile failed: env normal values should override fast defaults")
+
+        cli_normal = reviewer_args(
+            reviewer_test_args(engine="codex", model=["cli-codex"], thinking=["low"])
+        )[0]
+        if cli_normal.model != "cli-codex" or cli_normal.thinking != "low":
+            raise SystemExit("self-test fast profile failed: CLI values should override env and fast")
+
+        inline = reviewer_args(
+            reviewer_test_args(
+                reviewers="codex:inline-codex:minimal",
+                model=["cli-codex"],
+                thinking=["low"],
+            )
+        )[0]
+        if inline.model != "inline-codex" or inline.thinking != "minimal":
+            raise SystemExit("self-test fast profile failed: inline reviewer values should override fast")
+
+        os.environ.pop("AUTOREVIEW_CODEX_MODEL")
+        os.environ.pop("AUTOREVIEW_CODEX_THINKING")
+        service_tier = reviewer_args(
+            reviewer_test_args(engine="claude", fast=True, fast_strategy="service-tier")
+        )[0]
+        if service_tier.fast_strategy != "service-tier" or not service_tier.provider_fast_requested:
+            raise SystemExit("self-test fast profile failed: service-tier should request provider fast")
+        thinking_only = reviewer_args(
+            reviewer_test_args(engine="claude", fast=True, fast_strategy="thinking-only")
+        )[0]
+        if thinking_only.provider_fast_requested:
+            raise SystemExit("self-test fast profile failed: thinking-only should not request provider fast")
+
+        copilot = reviewer_args(reviewer_test_args(engine="copilot", fast=True))[0]
+        if copilot.thinking is not None or copilot.fast_thinking_source is not None:
+            raise SystemExit("self-test fast profile failed: copilot should not receive fast thinking")
+        try:
+            reviewer_args(reviewer_test_args(engine="copilot", fast=True, fast_thinking=["copilot=low"]))
+            raise SystemExit("self-test fast profile failed: copilot fast thinking should be rejected")
+        except SystemExit as exc:
+            if "not supported for copilot" not in str(exc):
+                raise
+        try:
+            reviewer_args(reviewer_test_args(engine="droid", fast=True, fast_thinking=["max"]))
+            raise SystemExit("self-test fast profile failed: invalid fast thinking should be rejected")
+        except SystemExit as exc:
+            if "invalid thinking level for droid" not in str(exc):
+                raise
+    print("self-test fast profile: ok")
+
+
 def main() -> int:
     args = parse_args()
     if args.self_test_opencode_jsonl_parser:
@@ -2946,6 +3177,9 @@ def main() -> int:
         return 0
     if args.self_test_fallback_scope:
         self_test_fallback_scope()
+        return 0
+    if args.self_test_fast_profile:
+        self_test_fast_profile()
         return 0
     if args.self_test_heartbeat_metrics:
         self_test_heartbeat_metrics()
@@ -2967,6 +3201,14 @@ def main() -> int:
             print(f"fallback_model: {reviewers[0].fallback_model}")
         if reviewers[0].thinking:
             print(f"thinking: {reviewers[0].thinking}")
+        if getattr(reviewers[0], "fast_enabled", False):
+            print(
+                "fast: enabled "
+                f"strategy={reviewers[0].fast_strategy} "
+                f"model_source={reviewers[0].model_source} "
+                f"thinking_source={reviewers[0].thinking_source} "
+                f"provider_fast={'requested' if reviewers[0].provider_fast_requested else 'off'}"
+            )
     else:
         print(f"reviewers: {', '.join(reviewer_label(reviewer) for reviewer in reviewers)}")
     print(f"tools: {'on' if args.tools else 'off'}")
