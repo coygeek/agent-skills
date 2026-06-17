@@ -53,17 +53,21 @@ def run_check(label, *command)
   exit 1
 end
 
+def run_python_check(label, *args)
+  run_check(label, { "PYTHONDONTWRITEBYTECODE" => "1" }, "python3", *args)
+end
+
 autoreview = File.join(root, "skills", "autoreview", "scripts", "autoreview")
 autoreview_harness = File.join(root, "skills", "autoreview", "scripts", "test-review-harness.py")
 autoreview_tests = File.join(root, "skills", "autoreview", "tests")
 
 if File.exist?(autoreview)
-  run_check("autoreview py_compile", "python3", "-m", "py_compile", autoreview, autoreview_harness)
+  run_python_check("autoreview py_compile", "-m", "py_compile", autoreview, autoreview_harness)
   run_check("autoreview config defaults self-test", autoreview, "--self-test-config-defaults")
   run_check("autoreview fallback scope self-test", autoreview, "--self-test-fallback-scope")
   run_check("autoreview fast profile self-test", autoreview, "--self-test-fast-profile")
   if Dir.exist?(autoreview_tests)
-    run_check("autoreview unit tests", "python3", "-m", "unittest", "discover", "-s", autoreview_tests, "-p", "test_*.py")
+    run_python_check("autoreview unit tests", "-m", "unittest", "discover", "-s", autoreview_tests, "-p", "test_*.py")
   end
 end
 
