@@ -204,6 +204,68 @@ class AutoreviewHardeningTests(unittest.TestCase):
         self.assertIn("--allow-tool=web_fetch", captured[-1])
         self.assertIn("--allow-all-urls", captured[-1])
 
+    def test_fast_profile_preserves_explicit_precedence(self) -> None:
+        old = os.environ.copy()
+        try:
+            os.environ.clear()
+            os.environ.update(
+                {
+                    "AUTOREVIEW_FAST": "1",
+                    "AUTOREVIEW_CODEX_FAST_MODEL": "env-fast-codex",
+                    "AUTOREVIEW_FAST_THINKING": "medium",
+                    "AUTOREVIEW_CODEX_MODEL": "env-codex",
+                    "AUTOREVIEW_CODEX_THINKING": "high",
+                }
+            )
+
+            reviewer = self.helper["reviewer_args"](
+                self.helper["reviewer_test_args"](
+                    reviewers="codex:inline-codex:minimal",
+                    model=["codex=cli-codex"],
+                    thinking=["codex=low"],
+                )
+            )[0]
+
+            self.assertTrue(reviewer.fast_enabled)
+            self.assertEqual(reviewer.model, "inline-codex")
+            self.assertEqual(reviewer.thinking, "minimal")
+            self.assertEqual(reviewer.model_source, "inline")
+            self.assertEqual(reviewer.thinking_source, "inline")
+            self.assertIsNone(reviewer.fast_model_source)
+            self.assertIsNone(reviewer.fast_thinking_source)
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+
+    def test_fast_profile_applies_gap_defaults_and_skips_copilot_thinking(self) -> None:
+        reviewers = self.helper["reviewer_args"](
+            self.helper["reviewer_test_args"](
+                reviewers="codex,copilot",
+                fast=True,
+                fast_model=["codex=fast-codex"],
+            )
+        )
+        codex = next(reviewer for reviewer in reviewers if reviewer.engine == "codex")
+        copilot = next(reviewer for reviewer in reviewers if reviewer.engine == "copilot")
+
+        self.assertEqual(codex.model, "fast-codex")
+        self.assertEqual(codex.thinking, self.helper["DEFAULT_FAST_THINKING"])
+        self.assertEqual(codex.fast_model_source, "fast-cli-engine")
+        self.assertEqual(codex.fast_thinking_source, "fast-default")
+        self.assertIsNone(copilot.thinking)
+        self.assertIsNone(copilot.fast_thinking_source)
+        self.assertTrue(copilot.provider_fast_requested)
+
+    def test_fast_profile_rejects_unsupported_engine_specific_thinking(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "not supported for copilot"):
+            self.helper["reviewer_args"](
+                self.helper["reviewer_test_args"](
+                    engine="copilot",
+                    fast=True,
+                    fast_thinking=["copilot=low"],
+                )
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
