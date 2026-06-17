@@ -2690,6 +2690,7 @@ def reviewer_args(args: argparse.Namespace) -> list[argparse.Namespace]:
     fast_strategy = args.fast_strategy or os.environ.get("AUTOREVIEW_FAST_STRATEGY", "auto").strip() or "auto"
     if fast_strategy not in FAST_STRATEGIES:
         raise SystemExit(f"invalid --fast-strategy/AUTOREVIEW_FAST_STRATEGY: {fast_strategy}")
+    fast_model_enabled = fast_enabled and fast_strategy != "thinking-only"
     reviewers: list[tuple[str, str | None, str | None]] = []
     if args.reviewers:
         tokens = [token.strip() for token in args.reviewers.split(",") if token.strip()]
@@ -2734,10 +2735,10 @@ def reviewer_args(args: argparse.Namespace) -> list[argparse.Namespace]:
             or global_model
             or env_model_by_engine.get(engine)
             or env_global_model
-            or (fast_enabled and fast_model_by_engine.get(engine))
-            or (fast_enabled and fast_model_global)
-            or (fast_enabled and env_fast_model_by_engine.get(engine))
-            or (fast_enabled and env_global_fast_model)
+            or (fast_model_enabled and fast_model_by_engine.get(engine))
+            or (fast_model_enabled and fast_model_global)
+            or (fast_model_enabled and env_fast_model_by_engine.get(engine))
+            or (fast_model_enabled and env_global_fast_model)
             or DEFAULT_MODEL_BY_ENGINE.get(engine)
         )
         model_source = "none"
@@ -2751,13 +2752,13 @@ def reviewer_args(args: argparse.Namespace) -> list[argparse.Namespace]:
             model_source = "env-engine"
         elif env_global_model:
             model_source = "env-global"
-        elif fast_enabled and fast_model_by_engine.get(engine):
+        elif fast_model_enabled and fast_model_by_engine.get(engine):
             model_source = "fast-cli-engine"
-        elif fast_enabled and fast_model_global:
+        elif fast_model_enabled and fast_model_global:
             model_source = "fast-cli-global"
-        elif fast_enabled and env_fast_model_by_engine.get(engine):
+        elif fast_model_enabled and env_fast_model_by_engine.get(engine):
             model_source = "fast-env-engine"
-        elif fast_enabled and env_global_fast_model:
+        elif fast_model_enabled and env_global_fast_model:
             model_source = "fast-env-global"
         elif DEFAULT_MODEL_BY_ENGINE.get(engine):
             model_source = "built-in"
@@ -3156,10 +3157,17 @@ def self_test_fast_profile() -> None:
         if service_tier.fast_strategy != "service-tier" or not service_tier.provider_fast_requested:
             raise SystemExit("self-test fast profile failed: service-tier should request provider fast")
         thinking_only = reviewer_args(
-            reviewer_test_args(engine="codex", fast=True, fast_strategy="thinking-only")
+            reviewer_test_args(
+                engine="codex",
+                fast=True,
+                fast_strategy="thinking-only",
+                fast_model=["codex=fast-codex"],
+            )
         )[0]
         if thinking_only.provider_fast_requested:
             raise SystemExit("self-test fast profile failed: thinking-only should not request provider fast")
+        if thinking_only.model == "fast-codex" or thinking_only.fast_model_source is not None:
+            raise SystemExit("self-test fast profile failed: thinking-only should not apply fast model aliases")
         claude = reviewer_args(reviewer_test_args(engine="claude", fast=True, fast_strategy="service-tier"))[0]
         if claude.provider_fast_requested:
             raise SystemExit("self-test fast profile failed: claude should not claim provider-native fast")

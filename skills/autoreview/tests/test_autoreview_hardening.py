@@ -305,6 +305,22 @@ class AutoreviewHardeningTests(unittest.TestCase):
         self.assertIsNone(copilot.fast_thinking_source)
         self.assertFalse(copilot.provider_fast_requested)
 
+    def test_fast_profile_thinking_only_ignores_fast_model_aliases(self) -> None:
+        reviewer = self.helper["reviewer_args"](
+            self.helper["reviewer_test_args"](
+                engine="droid",
+                fast=True,
+                fast_strategy="thinking-only",
+                fast_model=["droid=claude-opus-4-8-fast"],
+            )
+        )[0]
+
+        self.assertIsNone(reviewer.model)
+        self.assertEqual(reviewer.thinking, self.helper["DEFAULT_FAST_THINKING"])
+        self.assertEqual(reviewer.thinking_source, "fast-default")
+        self.assertIsNone(reviewer.fast_model_source)
+        self.assertFalse(reviewer.provider_fast_requested)
+
     def test_fast_profile_rejects_unsupported_engine_specific_thinking(self) -> None:
         with self.assertRaisesRegex(SystemExit, "not supported for copilot"):
             self.helper["reviewer_args"](

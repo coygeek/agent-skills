@@ -279,7 +279,7 @@ Fast strategy controls how much provider-native behavior is requested:
 |----------|----------|
 | `auto` | Default. Uses proven provider-native fast for Codex and fast thinking/model aliases for other engines. |
 | `service-tier` | Requests provider-native fast where this helper has verified a non-persistent syntax. Currently this is Codex only. Other engines still use documented thinking/model alias behavior. |
-| `thinking-only` | Does not request provider-native fast tier/model behavior; only applies fast thinking/effort where supported and not explicitly set. |
+| `thinking-only` | Does not request provider-native fast tier/model behavior and ignores fast model aliases; only applies fast thinking/effort where supported and not explicitly set. |
 
 Provider limits:
 
