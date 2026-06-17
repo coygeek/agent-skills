@@ -52,6 +52,55 @@ class AutoreviewHardeningTests(unittest.TestCase):
     def setUp(self) -> None:
         self.helper = load_helper()
 
+    def resolved_reviewer(self, **overrides: object) -> argparse.Namespace:
+        reviewer = self.helper["reviewer_args"](self.helper["reviewer_test_args"](**overrides))[0]
+        defaults = {
+            "codex_bin": "codex",
+            "claude_bin": "claude",
+            "droid_bin": "droid",
+            "copilot_bin": "copilot",
+            "opencode_bin": "opencode",
+            "pi_bin": "pi",
+            "tools": True,
+            "web_search": False,
+            "stream_engine_output": False,
+            "claude_allowed_tools": "Read,Grep,Glob,WebSearch,WebFetch",
+        }
+        for key, value in defaults.items():
+            setattr(reviewer, key, value)
+        return reviewer
+
+    def capture_engine_commands(self) -> list[list[str]]:
+        captured: list[list[str]] = []
+
+        def fake_run_with_heartbeat(
+            cmd: list[str],
+            cwd: Path,
+            **kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            captured.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, '{"findings":[]}', "")
+
+        for name in (
+            "run_codex",
+            "run_claude",
+            "run_droid",
+            "run_copilot",
+            "run_opencode",
+            "run_pi",
+        ):
+            self.helper[name].__globals__["run_with_heartbeat"] = fake_run_with_heartbeat
+            self.helper[name].__globals__["resolve_command"] = (
+                lambda command, repo: f"/resolved/{command}"
+            )
+        self.helper["run_claude"].__globals__["ensure_claude_isolation_supported"] = (
+            lambda args, repo: None
+        )
+        self.helper["run_pi"].__globals__["ensure_pi_isolation_supported"] = (
+            lambda args, repo: f"/resolved/{args.pi_bin}"
+        )
+        return captured
+
     def test_local_bundle_blocks_sensitive_untracked_file(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             repo = init_repo(Path(tempdir))
@@ -254,7 +303,7 @@ class AutoreviewHardeningTests(unittest.TestCase):
         self.assertEqual(codex.fast_thinking_source, "fast-default")
         self.assertIsNone(copilot.thinking)
         self.assertIsNone(copilot.fast_thinking_source)
-        self.assertTrue(copilot.provider_fast_requested)
+        self.assertFalse(copilot.provider_fast_requested)
 
     def test_fast_profile_rejects_unsupported_engine_specific_thinking(self) -> None:
         with self.assertRaisesRegex(SystemExit, "not supported for copilot"):
@@ -265,6 +314,86 @@ class AutoreviewHardeningTests(unittest.TestCase):
                     fast_thinking=["copilot=low"],
                 )
             )
+
+    def test_fast_provider_wiring_adds_codex_per_run_config_only_when_allowed(self) -> None:
+        captured = self.capture_engine_commands()
+        repo = Path("/repo")
+
+        fast = self.resolved_reviewer(engine="codex", fast=True)
+        self.helper["run_codex"](fast, repo, "prompt")
+        self.assertIn('service_tier="fast"', captured[-1])
+        self.assertIn('model_reasoning_effort="low"', captured[-1])
+        self.assertLess(captured[-1].index('service_tier="fast"'), captured[-1].index("exec"))
+
+        captured.clear()
+        thinking_only = self.resolved_reviewer(
+            engine="codex",
+            fast=True,
+            fast_strategy="thinking-only",
+        )
+        self.helper["run_codex"](thinking_only, repo, "prompt")
+        self.assertNotIn('service_tier="fast"', captured[-1])
+        self.assertIn('model_reasoning_effort="low"', captured[-1])
+
+    def test_fast_provider_wiring_uses_existing_effort_knobs_for_non_codex_engines(self) -> None:
+        captured = self.capture_engine_commands()
+        repo = Path("/repo")
+
+        claude = self.resolved_reviewer(engine="claude", fast=True)
+        self.helper["run_claude"](claude, repo, "prompt")
+        self.assertIn("--effort", captured[-1])
+        self.assertEqual(captured[-1][captured[-1].index("--effort") + 1], "low")
+        self.assertFalse(any("fastMode" in arg or "fast_mode" in arg for arg in captured[-1]))
+
+        droid = self.resolved_reviewer(
+            engine="droid",
+            fast=True,
+            fast_model=["droid=claude-opus-4-8-fast"],
+        )
+        self.helper["run_droid"](droid, repo, "prompt")
+        self.assertIn("--model", captured[-1])
+        self.assertEqual(captured[-1][captured[-1].index("--model") + 1], "claude-opus-4-8-fast")
+        self.assertIn("-r", captured[-1])
+        self.assertEqual(captured[-1][captured[-1].index("-r") + 1], "low")
+
+        opencode = self.resolved_reviewer(
+            engine="opencode",
+            fast=True,
+            fast_model=["opencode=github-copilot/gpt-5.4"],
+        )
+        self.helper["run_opencode"](opencode, repo, "prompt")
+        self.assertIn("-m", captured[-1])
+        self.assertEqual(captured[-1][captured[-1].index("-m") + 1], "github-copilot/gpt-5.4")
+        self.assertIn("--variant", captured[-1])
+        self.assertEqual(captured[-1][captured[-1].index("--variant") + 1], "low")
+
+        pi = self.resolved_reviewer(
+            engine="pi",
+            fast=True,
+            fast_model=["pi=openai/gpt-5.5"],
+        )
+        self.helper["run_pi"](pi, repo, "prompt")
+        self.assertIn("--model", captured[-1])
+        self.assertEqual(captured[-1][captured[-1].index("--model") + 1], "openai/gpt-5.5")
+        self.assertIn("--thinking", captured[-1])
+        self.assertEqual(captured[-1][captured[-1].index("--thinking") + 1], "low")
+
+    def test_fast_provider_wiring_keeps_copilot_model_only(self) -> None:
+        captured = self.capture_engine_commands()
+        repo = Path("/repo")
+        copilot = self.resolved_reviewer(
+            engine="copilot",
+            fast=True,
+            fast_model=["copilot=gpt-5.2"],
+        )
+
+        self.helper["run_copilot"](copilot, repo, "prompt")
+
+        self.assertIn("--model", captured[-1])
+        self.assertEqual(captured[-1][captured[-1].index("--model") + 1], "gpt-5.2")
+        self.assertNotIn("--effort", captured[-1])
+        self.assertNotIn("--reasoning-effort", captured[-1])
+        self.assertNotIn("--thinking", captured[-1])
 
 
 if __name__ == "__main__":
