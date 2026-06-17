@@ -250,6 +250,55 @@ Examples matching current `main` behavior:
 "$AUTOREVIEW" --engine opencode --model opencode/north-mini-code-free --thinking high
 ```
 
+## Fast review profile
+
+Use `--fast` when a closeout review should prefer lower-latency provider behavior without changing the default review path. Fast mode is opt-in and never persists provider settings.
+
+```bash
+# Preview the default Codex fast profile without spending provider calls
+"$AUTOREVIEW" --engine codex --fast --dry-run
+
+# Preview a mixed panel; Copilot remains model-only and receives no thinking value
+"$AUTOREVIEW" --reviewers codex,claude,copilot --fast --dry-run
+
+# Use a lower effort than the default fast `low` where the engine supports it
+"$AUTOREVIEW" --engine codex --fast --fast-thinking minimal
+
+# Use provider/model aliases only when no explicit model is set
+"$AUTOREVIEW" --reviewers droid,opencode,copilot --fast \
+  --fast-model droid=claude-opus-4-8-fast \
+  --fast-model opencode=github-copilot/gpt-5.4 \
+  --fast-model copilot=gpt-5.2
+```
+
+Precedence is strict: inline reviewer spec > CLI `--model` / `--thinking` > environment model/thinking > fast defaults > built-ins. For example, `--reviewers codex:gpt-5.5:high --fast` keeps `gpt-5.5:high`.
+
+Fast strategy controls how much provider-native behavior is requested:
+
+| Strategy | Behavior |
+|----------|----------|
+| `auto` | Default. Uses proven provider-native fast for Codex and fast thinking/model aliases for other engines. |
+| `service-tier` | Requests provider-native fast where this helper has verified a non-persistent syntax. Currently this is Codex only. Other engines still use documented thinking/model alias behavior. |
+| `thinking-only` | Does not request provider-native fast tier/model behavior; only applies fast thinking/effort where supported and not explicitly set. |
+
+Provider limits:
+
+| Engine | Fast behavior |
+|--------|---------------|
+| **codex** | Adds the per-run config override `-c service_tier="fast"` before `exec` when strategy is `auto` or `service-tier`; never edits `config.toml` and does not force `features.fast_mode=true`, which can violate managed requirements when fast mode is pinned off. |
+| **claude** | Effort-only in headless print mode: `--effort low` when no explicit thinking is set. The installed help does not expose a non-persistent Claude Fast mode flag for `--print`. |
+| **droid** | Uses `-r, --reasoning-effort low` when no explicit thinking is set. Fast model IDs are opt-in aliases via `--fast-model droid=...` or env. |
+| **opencode** | Uses `--variant low` when no explicit thinking is set. Fast provider/model IDs are opt-in aliases via `--fast-model opencode=...` or env. |
+| **pi** | Uses `--thinking low` when no explicit thinking is set. Fast model IDs are opt-in aliases via `--fast-model pi=...` or env. |
+| **copilot** | Model-only. Fast model aliases may set `--model`, but the helper never passes thinking or effort flags to Copilot. |
+
+Use `--fast-strategy thinking-only` if a provider-native fast tier is unsupported, quota-gated, or not desired for the review. Use `--dry-run` to prove the resolved engine/model/thinking/fast metadata before live review:
+
+```bash
+"$AUTOREVIEW" --engine codex --fast --fast-strategy thinking-only --dry-run
+"$AUTOREVIEW" --reviewers codex,claude,copilot --fast --dry-run
+```
+
 ### Environment defaults
 
 CLI flags take precedence over environment variables.
@@ -262,6 +311,12 @@ CLI flags take precedence over environment variables.
 | `AUTOREVIEW_<ENGINE>_MODEL` | Per-engine model override, for example `AUTOREVIEW_CODEX_MODEL=gpt-5.5` |
 | `AUTOREVIEW_<ENGINE>_THINKING` | Per-engine thinking override |
 | `AUTOREVIEW_CLAUDE_FALLBACK_MODEL` | Claude-only fallback chain |
+| `AUTOREVIEW_FAST` | Enable fast mode when set to `1`, `true`, `yes`, or `on`; disable with `--no-fast` |
+| `AUTOREVIEW_FAST_STRATEGY` | Default fast strategy: `auto`, `service-tier`, or `thinking-only` |
+| `AUTOREVIEW_FAST_THINKING` | Default fast thinking/effort for all engines that support thinking |
+| `AUTOREVIEW_<ENGINE>_FAST_THINKING` | Per-engine fast thinking/effort |
+| `AUTOREVIEW_FAST_MODEL` | Default fast model alias for all engines when no explicit model is set |
+| `AUTOREVIEW_<ENGINE>_FAST_MODEL` | Per-engine fast model alias |
 
 Codex maps thinking to `model_reasoning_effort`. Claude maps thinking to `--effort`. Droid maps thinking to `-r, --reasoning-effort`. Pi maps thinking to `--thinking`. OpenCode maps thinking to `--variant`. Copilot rejects `--thinking`. Only Claude accepts `--fallback-model`; global CLI/env fallback requires at least one Claude reviewer, and engine-specific fallback overrides require that reviewer to be selected. Non-Claude fallback overrides, including `AUTOREVIEW_<NONCLAUDE>_FALLBACK_MODEL`, fail closed instead of being silently ignored.
 
