@@ -13,6 +13,8 @@ repo.
 
 - `agent-transcript`: local-only, redacted PR/issue transcript provenance.
 - `autoreview`: structured closeout/code-review workflow plus helper script.
+- `behavior-validator`: source-blind validation of user-visible behavior against
+  a contract.
 - `crabbox`: Crabbox/Testbox remote validation workflow for broad or CI-parity
   proof.
 - `handoff`: path-free prompt handoff workflow for delegating a task to another
@@ -135,6 +137,9 @@ skills/
   autoreview/
     SKILL.md
     scripts/
+  behavior-validator/
+    SKILL.md
+    references/
   crabbox/
     SKILL.md
   handoff/
