@@ -27,7 +27,7 @@ cp behavior-contract.md "$validator_dir/"
 cd "$validator_dir"
 ```
 
-Launch or connect to the target from the contract. Keep only the contract, allowed fixtures, credentials explicitly provided for testing, and captured evidence in the private validator workspace. Do not use fixed shared paths for contracts, credentials, or captured evidence. If the app must be started from the source checkout, start it from a separate terminal and do not read source while validating.
+Launch or connect to the target from the contract. Keep only the contract, allowed fixtures, and redacted captured evidence in the private validator workspace. Supply credentials through approved secret tooling or exact environment variables; never copy credential values into the workspace, report, screenshots, or logs. Do not use fixed shared paths for contracts or captured evidence. If the app must be started from the source checkout, start it from a separate terminal and do not read source while validating.
 
 ## Workflow
 
@@ -35,7 +35,7 @@ Launch or connect to the target from the contract. Keep only the contract, allow
 2. Prepare runtime access: target URL, CLI command, API endpoint, fixture data, credentials, or generated artifact path.
 3. Exercise each user task as a real user or operator would.
 4. Run anti-cheat probes: vary fixture data, refresh/retry, test empty and invalid inputs, verify persistence, inspect generated output, and confirm buttons/commands perform real work rather than only displaying success text.
-5. Capture evidence as compact notes, screenshots, terminal excerpts, response bodies, file summaries, or accessibility observations.
+5. Capture evidence as compact redacted notes, screenshots, terminal excerpts, response summaries, file summaries, or accessibility observations. Omit credentials, tokens, cookies, private user data, and unrelated log content.
 6. Emit a structured report. Use `references/report-schema.md` when a machine-readable report is useful.
 7. If the orchestrator fixes a finding, rerun only the affected contract clauses plus any nearby regression probes.
 

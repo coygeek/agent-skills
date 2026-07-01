@@ -11,7 +11,7 @@ Use this shape when the user has not provided a behavior contract. Keep it short
 ## Target
 - Type: web app | CLI | API | generated artifact | other
 - Launch or access: <URL, command, endpoint, artifact path, or setup command>
-- Allowed fixtures or credentials: <only what the validator may use>
+- Allowed fixtures and credential source: <fixtures plus approved secret-tool or exact environment-variable names; never values>
 
 ## User Tasks
 1. <Concrete task a real user/operator performs.>

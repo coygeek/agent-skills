@@ -14,7 +14,7 @@ Use this JSON shape when the orchestrator needs machine-readable behavior valida
     {
       "contract_clause": "User task 1",
       "status": "pass",
-      "severity": "P2",
+      "severity": null,
       "evidence": "Created an invoice, refreshed the page, and saw it remain in the invoice list.",
       "reproduction_steps": [
         "Open /invoices",
@@ -48,4 +48,4 @@ Allowed check `status` values:
 - `blocked`
 - `out_of_scope`
 
-Use `fail` for observable contract violations, including static or fake behavior. Use `blocked` only when runtime access or required test inputs are unavailable.
+Use `severity` only for `fail` checks; use `null` otherwise. Use `fail` for observable contract violations, including static or fake behavior. Use `blocked` only when runtime access or required test inputs are unavailable. Redact credentials, tokens, cookies, private user data, and unrelated log content from every evidence field.
