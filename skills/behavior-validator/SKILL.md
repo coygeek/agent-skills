@@ -21,12 +21,13 @@ Validate observable behavior without inspecting source. Use this as the black-bo
 Prefer a source-blind workspace:
 
 ```sh
-mkdir -p /tmp/behavior-validator-run
-cp behavior-contract.md /tmp/behavior-validator-run/
-cd /tmp/behavior-validator-run
+validator_dir="$(mktemp -d "${TMPDIR:-/tmp}/behavior-validator-run.XXXXXX")"
+chmod 700 "$validator_dir"
+cp behavior-contract.md "$validator_dir/"
+cd "$validator_dir"
 ```
 
-Launch or connect to the target from the contract. Keep only the contract, allowed fixtures, credentials explicitly provided for testing, and captured evidence in the validator workspace. If the app must be started from the source checkout, start it from a separate terminal and do not read source while validating.
+Launch or connect to the target from the contract. Keep only the contract, allowed fixtures, credentials explicitly provided for testing, and captured evidence in the private validator workspace. Do not use fixed shared paths for contracts, credentials, or captured evidence. If the app must be started from the source checkout, start it from a separate terminal and do not read source while validating.
 
 ## Workflow
 
